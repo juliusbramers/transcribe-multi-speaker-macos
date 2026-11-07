@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make build *)",
+      "Bash(swift build *)",
+      "Bash(swift run *)",
+      "Bash(xcodebuild *)",
+      "Bash(git clone --depth 1 --branch v0.0.29 https://github.com/soniqo/speech-swift *)"
+    ]
+  }
+}
