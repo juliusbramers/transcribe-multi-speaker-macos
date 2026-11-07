@@ -17,6 +17,14 @@ There is no hosted CI. The checks run locally:
 | When | What |
 |---|---|
 | `git commit` | betterleaks on staged changes, `swift format lint` on staged Swift files |
-| `git push` | `scripts/check.sh`: full-history secrets scan, format lint, `swift build`, `swift test` |
+| `git push` | `scripts/check.sh`: full-history secrets scan, format lint, `swift build`, tests |
 
-Requires macOS on Apple Silicon, full Xcode (Command Line Tools alone cannot run `swift test`) and `brew install betterleaks`.
+Requires macOS on Apple Silicon, the Xcode Command Line Tools (`xcode-select --install`) and `brew install betterleaks`. Full Xcode is not needed.
+
+### Tests without Xcode
+
+`swift test` needs full Xcode (XCTest and Swift Testing are not usable with the Command Line Tools alone), so tests live in an executable target instead:
+
+- `Sources/selftest/` is an executable target that depends on the library target and runs every test case.
+- A failing case prints its name and the mismatch; any failure exits non-zero.
+- Run it with `swift run selftest`; `scripts/check.sh` runs it automatically when the folder exists.
