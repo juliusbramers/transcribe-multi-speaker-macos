@@ -1,0 +1,23 @@
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Models, audio and transcripts stay out of git (use the workspace's data/ folder)
+models/
+*.mlmodelc/
+*.mlpackage/
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.aac
+*.mp4
+*.mov
+
+# Local
+.env
+.env.*
+.DS_Store

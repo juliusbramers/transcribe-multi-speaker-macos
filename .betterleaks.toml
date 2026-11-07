@@ -1,0 +1,4 @@
+# Extends the default betterleaks rules. If a rule flags a synthetic test value,
+# add an allowlist entry here rather than removing the hook.
+[extend]
+useDefault = true

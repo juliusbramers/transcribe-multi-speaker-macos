@@ -1,0 +1,24 @@
+#!/bin/sh
+# Fast checks on staged changes: secrets, then Swift formatting. Full checks run on push.
+set -e
+
+if command -v betterleaks >/dev/null 2>&1; then
+  betterleaks git --pre-commit --staged --no-banner -v -l warn || {
+    echo "" >&2
+    echo "betterleaks: potential secret in staged changes (findings above)." >&2
+    echo "False positive? Add a 'betterleaks:allow' comment or extend .betterleaks.toml." >&2
+    exit 1
+  }
+else
+  echo "betterleaks not installed, skipping secrets scan. Install: brew install betterleaks" >&2
+fi
+
+staged_swift=$(git diff --cached --name-only --diff-filter=ACMR -- '*.swift')
+if [ -n "$staged_swift" ]; then
+  # shellcheck disable=SC2086
+  swift format lint --strict $staged_swift || {
+    echo "" >&2
+    echo "swift format: fix with 'swift format --in-place <files>' (or scripts/check.sh --fix)." >&2
+    exit 1
+  }
+fi
