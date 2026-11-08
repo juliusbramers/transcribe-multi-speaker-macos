@@ -4,11 +4,12 @@ How `tmsm` behaves when a script or another program calls it: what goes to stdou
 
 ## The rules
 
-- **A run never asks**, with one exception: the very first run, when a person is at a terminal (stdin, stdout and stderr all terminals) and passes none of `-`, `--output -`, `--preset`, `--json` or `--quiet`. That run asks once for a preset. Anything a script does skips the question. Otherwise `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4), language `auto`, output to the Desktop, and the configured preset (else `default`). Models that are missing are downloaded, with progress on stderr.
+- **A run never asks**, whatever the terminal. `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4), language `auto`, output to the Desktop, and the configured preset (else `default`). Models that are missing are downloaded, with progress on stderr.
 - **stdout holds only the result**: the path of the written file, the Markdown itself with `--output -`, or one JSON object with `--json`. Everything else goes to stderr.
 - **Progress goes to stderr.** In a terminal it is one redrawn line. Without one, it is a plain line per stage (`tmsm: Transcribing`). `--quiet` turns it off.
 - **Errors**: one line, `tmsm: <message>`, on stderr. The exit code is non-zero.
-- **Exit codes**: `0` success, `1` failure, `64` bad usage (an unknown flag or value).
+- **Exit codes**: `0` success, `1` failure, `64` bad usage: an unknown flag, an unknown `--preset`, or a `--language` that isn't `auto` or a two-letter code (`de`, `de-DE`). A language the preset doesn't cover is a failure (`1`), since that depends on the preset in use.
+- **Language**: without `--language`, tmsm detects it. If it can't tell, or hears a language the preset doesn't cover, it stops with exit `1` and asks for `--language`, listing the codes it supports. It never guesses.
 - **Nothing is overwritten.** If `memo.md` exists, the run writes `memo 2.md`, `memo 3.md`, …
 
 ## Transcribe
@@ -53,16 +54,16 @@ ssh phone cat voice.opus | tmsm - --name "Journal 2026-11-08" --output - >> jour
 
 ## Determinism
 
-The same audio, preset and options, on the same tmsm version and Mac, give byte-identical Markdown. Nothing random, no timestamps of the run, and no paths go into the transcript. `scripts/package-check.sh` checks this on every packaging run: two piped runs and one file run must match byte for byte.
+The same audio, preset and options, on the same tmsm version and Mac, give byte-identical Markdown. Nothing random, no timestamps of the run, and no paths go into the transcript. `scripts/package-check.sh` checks it: two piped runs and one file run must match byte for byte. `scripts/release.sh --publish` runs that check (preset `fast`, a voice-memo fixture) on the exact tarball it is about to upload, and publishes nothing if it fails.
 
 `tmsm <file>` is short for `tmsm transcribe <file>`. A file named like a subcommand (`setup`) needs `tmsm transcribe setup` or a path such as `./setup`.
 
-## First launch and setup
+## Install and setup questions
 
 The presets, their models and measured RAM are in [models.md](models.md). `tmsm setup --list` (quoted below) prints them from the program itself.
 
 
-- If no preset has been chosen yet, the first run in a terminal asks for one and downloads it. Without a terminal, or with `--preset`, `--json` or `--quiet`, nothing is asked: the run uses the `default` preset, downloads its models as needed, and saves no choice.
+- Questions come only from `tmsm install` and `tmsm setup`. `tmsm install` asks for a preset when stdin, stdout and stderr are all terminals and no preset has been chosen yet; `--no-setup` skips the question. A run with no preset chosen uses `default`, downloads its models as needed, and prints one line on stderr saying so (not with `--quiet`). It saves no choice.
 - `tmsm setup` without options asks in a terminal. With options it never asks, which is how an agent sets up:
 
 ```sh

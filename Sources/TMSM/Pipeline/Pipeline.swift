@@ -140,9 +140,15 @@ public struct Pipeline: Sendable {
 
     let words: [Word]
     let speakers: [Int]
-    if choice.strategy == .turnwise && limit > 1 {
-      // Speakers first, then one decode per speaker turn (see TurnwiseDecoding).
-      try await labelSpeakers()
+    if choice.strategy == .turnwise {
+      // Speakers first, then one decode per speaker turn (see TurnwiseDecoding). With one
+      // speaker there is nothing to label: the whole file is one speaker-0 turn, split at
+      // quiet points like any long turn, and decoded the same way.
+      if limit > 1 {
+        try await labelSpeakers()
+      } else {
+        track = SpeakerTrack(segments: [SpeakerSegment(0, 0, audio.duration)])
+      }
       let pieces = TurnwiseDecoding.plan(
         segments: track.segments, sampleCount: audio.samples.count, maxSpeakers: limit
       ) { Chunking.meanSquare(audio.samples, $0) }

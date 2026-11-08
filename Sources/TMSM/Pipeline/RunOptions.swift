@@ -74,6 +74,36 @@ public struct RunOptions: ParsableArguments, Sendable {
 
   public init() {}
 
+  /// Usage mistakes fail at parse time, with exit code 64, before anything runs.
+  public mutating func validate() throws {
+    if let preset {
+      let names = Catalogue.shared.presetNames + [Config.individual]
+      guard names.contains(preset.lowercased()) else {
+        throw ValidationError(
+          "Unknown preset '\(preset)'. Choose one of: \(names.joined(separator: ", ")).")
+      }
+    }
+    guard RunOptions.isLanguageSyntax(language) else {
+      throw ValidationError(
+        "--language takes auto or a two-letter ISO 639-1 code such as de or en (de-DE works too), not '\(language)'."
+      )
+    }
+  }
+
+  /// `auto`, `de`, `de-DE`, `de_DE`, `DE`.
+  public static func isLanguageSyntax(_ value: String) -> Bool {
+    if value.lowercased() == "auto" { return true }
+    let parts = value.split(separator: "-", omittingEmptySubsequences: false)
+      .flatMap { $0.split(separator: "_", omittingEmptySubsequences: false) }
+    guard let code = parts.first, code.count == 2, code.allSatisfy({ $0.isASCII && $0.isLetter })
+    else { return false }
+    return parts.dropFirst().allSatisfy {
+      $0.count >= 2 && $0.count <= 4 && $0.allSatisfy(\.isASCII)
+        && $0.allSatisfy { $0.isLetter || $0.isNumber }
+    }
+      && parts.count <= 3
+  }
+
   public var readsStdin: Bool { file == AudioInput.stdinName }
   public var writesStdout: Bool { output == "-" }
 

@@ -51,13 +51,43 @@ public struct Transcript: Sendable, Equatable {
       out += "\n_No speech found._\n"
     }
     for turn in turns {
-      out += "\nSpeaker \(turn.speaker): \(turn.text)\n"
+      out += "\nSpeaker \(turn.speaker): \(Transcript.escapeText(turn.text))\n"
     }
     return out
   }
 
-  /// A file name is plain text in a heading: keep it on one line.
-  static func escapeHeading(_ s: String) -> String {
+  /// A file name is plain text in a heading: one line, and every character that could start
+  /// Markdown or HTML (links, emphasis, code, closing #s, entities) escaped. Dots, dashes and
+  /// parentheses on their own change nothing and stay as they are.
+  public static func escapeHeading(_ s: String) -> String {
+    escape(oneLine(s), Set("\\`*_{}[]<>#!|~&"))
+  }
+
+  /// Recognised speech is shown as written: only what would change rendering is escaped (HTML,
+  /// code, links), and anything that would start a block at the beginning of a line. Commas,
+  /// periods, apostrophes and the like stay readable.
+  public static func escapeText(_ s: String) -> String {
+    var text = escape(oneLine(s), Set("\\`<[]"))
+    // A turn follows "Speaker N: ", so these only matter if a line ever starts with them.
+    if let first = text.first, "#>-*+".contains(first) { text = "\\" + text }
+    if let dot = text.firstIndex(where: { !$0.isNumber }), dot != text.startIndex,
+      text[dot] == "." || text[dot] == ")"
+    {
+      text.insert("\\", at: dot)
+    }
+    return text
+  }
+
+  static func oneLine(_ s: String) -> String {
     s.components(separatedBy: .newlines).joined(separator: " ")
+  }
+
+  static func escape(_ s: String, _ special: Set<Character>) -> String {
+    var out = ""
+    for c in s {
+      if special.contains(c) { out.append("\\") }
+      out.append(c)
+    }
+    return out
   }
 }

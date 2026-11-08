@@ -22,10 +22,11 @@ func fail(_ error: Error) -> ExitCode {
   return ExitCode.failure
 }
 
-/// The first launch in a terminal asks for a preset and downloads it. Without a terminal
-/// nothing is asked and runs use the default preset.
+/// `tmsm install`'s question: only with stdin, stdout and stderr all terminals and no preset
+/// chosen yet. Otherwise nothing is asked and runs use the default preset.
 func firstLaunch(_ home: TMSMHome, console: Console) async throws {
-  guard console.isInteractive, !FileManager.default.fileExists(atPath: home.configFile.path)
+  guard console.isInteractive, isatty(STDOUT_FILENO) == 1,
+    !FileManager.default.fileExists(atPath: home.configFile.path)
   else { return }
   console.say("Welcome to tmsm.")
   let setup = ModelSetup(home: home)
@@ -48,12 +49,13 @@ struct Transcribe: AsyncParsableCommand {
     do {
       try Uninstaller.claim(home, environment: ProcessInfo.processInfo.environment)
       runTemp = try home.activate()
-      // Only a person at a terminal is asked; anything piped, or any flag a script would
-      // pass, means "use the default and download what's missing".
-      let person =
-        options.preset == nil && !options.json && !options.quiet && !options.readsStdin
-        && !options.writesStdout && isatty(STDOUT_FILENO) == 1
-      if person { try await firstLaunch(home, console: TerminalConsole()) }
+      // A run never asks. Without a chosen preset it uses the default, and says so once.
+      if options.preset == nil && !options.quiet
+        && !FileManager.default.fileExists(atPath: home.configFile.path)
+      {
+        FileHandle.standardError.write(
+          Data("tmsm: no preset chosen yet, using default; run `tmsm setup` to choose one\n".utf8))
+      }
       let result = try await Pipeline(home: home, scratch: runTemp).run(options, progress: progress)
       progress.finish()
       if options.json {

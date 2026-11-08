@@ -118,6 +118,31 @@ enum SetupCases {
       installer.programFolder.appendingPathComponent(Installer.manifestName))
   }
 
+  /// A 16 kHz mono 16-bit WAV of a quiet tone.
+  static func wav(seconds: Int) -> Data {
+    let count = seconds * Audio.sampleRate
+    var data = Data()
+    func u32(_ v: UInt32) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+    func u16(_ v: UInt16) { withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) } }
+    data.append(contentsOf: Array("RIFF".utf8))
+    u32(UInt32(36 + count * 2))
+    data.append(contentsOf: Array("WAVEfmt ".utf8))
+    u32(16)
+    u16(1)
+    u16(1)
+    u32(UInt32(Audio.sampleRate))
+    u32(UInt32(Audio.sampleRate * 2))
+    u16(2)
+    u16(16)
+    data.append(contentsOf: Array("data".utf8))
+    u32(UInt32(count * 2))
+    for i in 0..<count {
+      let v = Int16(3000 * sin(Double(i) * 2 * .pi * 220 / Double(Audio.sampleRate)))
+      withUnsafeBytes(of: v.littleEndian) { data.append(contentsOf: $0) }
+    }
+    return data
+  }
+
   static func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
 
   static func read(_ url: URL) -> String? { try? String(contentsOf: url, encoding: .utf8) }
@@ -964,6 +989,110 @@ enum SetupCases {
       t.expect(Pipeline.nameSource(file, input: input), input, "a file keeps its own name")
     }
 
+    t.test("markdown: headings escape all markup, turn text only what changes rendering") {
+      t.expect(
+        Transcript.escapeHeading("[private](https://example.org) *x* <b>#1</b>.m4a"),
+        "\\[private\\](https://example.org) \\*x\\* \\<b\\>\\#1\\</b\\>.m4a")
+      t.expect(Transcript.escapeHeading("memo 2026-11-08.opus"), "memo 2026-11-08.opus")
+      t.expect(Transcript.escapeHeading("a\nb"), "a b")
+      t.expect(
+        Transcript.escapeText("Okay, it's 5 p.m. - see `ls` <here> [1] and_this *too*."),
+        "Okay, it's 5 p.m. - see \\`ls\\` \\<here> \\[1\\] and_this *too*.")
+      t.expect(Transcript.escapeText("# not a heading"), "\\# not a heading")
+      t.expect(Transcript.escapeText("1. not a list"), "1\\. not a list")
+      t.expect(Transcript.escapeText("2026 was good."), "2026 was good.")
+      let md = Transcript(
+        title: "[x](y).m4a", turns: [Turn(speaker: 1, text: "<script>", start: 0, end: 1)]
+      ).markdown
+      t.expect(md, "# \\[x\\](y).m4a\n\nSpeaker 1: \\<script>\n")
+    }
+
+    t.test("flags: a wrong --preset or --language is a usage error (exit 64)") {
+      for bad in [
+        ["memo.m4a", "--preset", "typo"], ["memo.m4a", "--language", "german"],
+        ["memo.m4a", "--language", "d"], ["memo.m4a", "--language", "de-"],
+      ] {
+        do {
+          _ = try RunOptions.parse(bad)
+          t.fail("accepted \(bad)")
+        } catch {
+          t.expect(RunOptions.exitCode(for: error).rawValue, 64, "\(bad)")
+        }
+      }
+      for good in [
+        ["m", "--preset", "Accurate"], ["m", "--language", "de-DE"],
+        ["m", "--language", "pt_BR"], ["m", "--language", "AUTO"], ["m", "--preset", "individual"],
+      ] {
+        t.expect((try? RunOptions.parse(good)) != nil, "rejected \(good)")
+      }
+    }
+
+    t.test("speakers 1 on a turn-wise preset: no labelling, turns decoded together") {
+      final class Calls: @unchecked Sendable { var log: [String] = [] }
+      let calls = Calls()
+      struct ASR: TranscriptionEngine {
+        let calls: Calls
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress) async throws
+          -> [Word]
+        {
+          calls.log.append("whole")
+          return [Word("hallo", 0, 0.5)]
+        }
+        func transcribe(segments: [Audio], language: String?, progress: TMSM.Progress)
+          async throws -> [[Word]]
+        {
+          calls.log.append("segments \(segments.count)")
+          return segments.map { _ in [Word("hallo", 0, 0.5)] }
+        }
+      }
+      struct Labeller: SpeakerEngine {
+        let calls: Calls
+        func label(_ audio: Audio, maxSpeakers: Int, progress: TMSM.Progress) async throws
+          -> SpeakerTrack
+        {
+          calls.log.append("label")
+          return SpeakerTrack(segments: [SpeakerSegment(0, 0, audio.duration)])
+        }
+      }
+      let cat = Catalogue(
+        [
+          EngineRegistration(
+            engine: "test",
+            entries: [
+              CatalogueEntry(
+                id: "asr", name: "ASR", engine: "test", languages: ["de"], downloadMB: 1,
+                license: "", gated: false, factory: .transcription { _ in ASR(calls: calls) },
+                storage: { _ in [] }),
+              CatalogueEntry(
+                id: "spk", name: "SPK", engine: "test", languages: [], downloadMB: 1, license: "",
+                gated: false, factory: .speakers { _ in Labeller(calls: calls) },
+                storage: { _ in [] }),
+            ])
+        ],
+        presets: [
+          Preset(
+            name: "tw", transcription: "asr", speakers: "spk", summary: "", ramGB: nil,
+            strategy: .turnwise)
+        ])
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let home = TMSMHome(root: dir.appendingPathComponent("home"))
+      try Config(preset: "tw").save(to: home.configFile)
+      let wav = dir.appendingPathComponent("tone.wav")
+      try SetupCases.wav(seconds: 2).write(to: wav)
+      let pipeline = Pipeline(home: home, catalogue: cat, environment: [:], cwd: dir)
+      final class Box: @unchecked Sendable { var result: RunResult? }
+      let box = Box()
+      try blocking {
+        box.result = try await pipeline.run(
+          try RunOptions.parse([wav.path, "--speakers", "1", "--language", "de", "-o", "-"]),
+          progress: .silent)
+      }
+      t.expect(calls.log, ["segments 1"], "no labelling, no whole-file decode")
+      t.expect(box.result?.speakerModel, nil)
+      t.expect(box.result?.markdown, "# tone.wav\n\nSpeaker 1: hallo\n")
+    }
+
     t.test("pipes: --json with --output - carries the Markdown, no path") {
       let result = RunResult(
         output: nil, markdown: "# stdin\n\nSpeaker 1: Hi.\n", input: "-", preset: "fast",
@@ -1061,10 +1190,10 @@ enum SetupCases {
             quoted.trimmingCharacters(in: .newlines) == actual,
             "\(doc): `tmsm \(args.joined(separator: " "))` differs; run scripts/docs-reference.sh")
         }
-        // Only lines about tmsm: `xcode-select --install` and the install line's curl flags
-        // are not ours to check.
+        // Only lines about tmsm: `xcode-select --install`, the install line's curl flags and
+        // the repo scripts' flags are not ours to check.
         let ours = text.components(separatedBy: "\n").filter {
-          $0.contains("tmsm") && !$0.contains("curl ")
+          $0.contains("tmsm") && !$0.contains("curl ") && !$0.contains("scripts/")
         }
         let unknown = flags(ours.joined(separator: "\n")).subtracting(flags(helpText))
         t.expect(unknown.isEmpty, "\(doc) names flags tmsm doesn't have: \(unknown.sorted())")

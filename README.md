@@ -31,7 +31,7 @@ Add `> memo.md` to keep the transcript. After that, `cat memo.m4a | tmsm - --out
   - zsh: one line, marked `# tmsm`, in `~/.zprofile`;
   - bash: the same line in the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile` that exists;
   - fish: the snippet `~/.config/fish/conf.d/tmsm.fish`.
-- It then asks for a quality preset and downloads its models from Hugging Face. Nothing else is downloaded until you choose.
+- In a terminal, it then asks for a quality preset and downloads its models from Hugging Face. Nothing else is downloaded until you choose. Transcription runs never ask: without a choice they use `default`.
 
 The builds are not signed. A copy fetched with `curl` carries no quarantine mark, so macOS starts it without a dialog. A copy downloaded in a browser is blocked until you clear the mark once: `xattr -dr com.apple.quarantine <folder>`.
 

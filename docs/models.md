@@ -44,12 +44,15 @@ en/de.
   25.3 %; bake-off, session D).
 
 **Language.** `--language` wins. Otherwise the language is detected once per file from up to
-three windows of speech (about a minute), with Apple's language recogniser constrained to the
-detecting model's languages, and that language is passed to every window or turn. Qwen3-ASR
-left to detect per turn emitted Chinese on about 18 % of English turns, so it is never run
-without a language. fast and default detect with Ultra and fall back to Qwen3-ASR when unsure;
-accurate and extreme detect with Qwen3-ASR. When no detector is sure, English is used and a note
-says so.
+three windows of speech (about a minute), and that language is passed to every window or turn.
+Qwen3-ASR left to detect per turn emitted Chinese on about 18 % of English turns, so it is never
+run without a language. A detecting model transcribes the sample, and Apple's language
+recogniser reads that text against every language it knows, not only the preset's. So a
+language no route covers comes out as itself. fast and default detect with Ultra and go on to
+Qwen3-ASR when Ultra is unsure or hears a language it can't write; accurate and extreme detect
+with Qwen3-ASR. A language the preset doesn't cover, or speech no detector is sure of, is an
+error that asks for `--language` and lists the supported codes. tmsm never guesses English.
+A recording with no speech gives an empty transcript.
 
 **Determinism.** Decoding is greedy everywhere; the same audio and preset give byte-identical
 Markdown (checked: accurate twice on an 8.4-minute German recording).

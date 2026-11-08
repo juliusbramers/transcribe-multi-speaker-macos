@@ -1,23 +1,49 @@
 #!/bin/sh
 # Build and package a tmsm release locally. There is no hosted CI.
-#   scripts/release.sh            dry run: release build, tarball, SHA256SUMS, checks; nothing leaves the Mac
-#   scripts/release.sh --publish  also creates GitHub release v<version> with those two files
+#   scripts/release.sh [--audio FILE --work DIR]
+#       dry run: release build, macOS 15 gate, tarball, SHA256SUMS; with --audio also the
+#       package check below. Nothing leaves the Mac.
+#   scripts/release.sh --publish --audio FILE --work DIR
+#       the same, then GitHub release v<version> with the two files, but only if the package
+#       check passed on this exact tarball
+#
+# The package check is scripts/package-check.sh on the tarball just built: install, setup
+# (fast), transcribe FILE, two piped runs compared byte for byte with the file run, uninstall,
+# and a scan that nothing is left. DIR (empty or new) gets its temp HOME and the downloaded
+# models; FILE is the audio fixture (e.g. a short voice memo).
 #
 # Output: dist/tmsm-<version>-macos-arm64.tar.gz and dist/SHA256SUMS. The tarball holds one folder,
-# tmsm-<version>-macos-arm64/, with the tmsm executable, the Metal library and resource bundles
-# SwiftPM put beside it, NOTICE and README.md. The version comes from Sources/TMSM/Version.swift.
+# tmsm-<version>-macos-arm64/, with the tmsm executable, mlx.metallib, back-deploy dylibs,
+# resource bundles, NOTICE, THIRD_PARTY_LICENSES, README.md and uninstall.sh. The version comes
+# from Sources/TMSM/Version.swift.
 #
 # --publish never replaces an asset: if release v<version> already has a file of the same name,
 # it stops. Publishing needs a clean tree whose HEAD is on origin/main, and `gh` logged in.
 set -eu
 cd "$(dirname "$0")/.."
 
+usage() { echo "usage: scripts/release.sh [--publish] [--audio FILE --work DIR]" >&2; exit 2; }
 publish=0
-case "${1:-}" in
-  "") ;;
-  --publish) publish=1 ;;
-  *) echo "usage: scripts/release.sh [--publish]" >&2; exit 2 ;;
-esac
+audio=""
+work=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --publish) publish=1 ;;
+    --audio) [ $# -ge 2 ] || usage; audio="$2"; shift ;;
+    --work) [ $# -ge 2 ] || usage; work="$2"; shift ;;
+    *) usage ;;
+  esac
+  shift
+done
+if [ -n "$audio$work" ] && { [ -z "$audio" ] || [ -z "$work" ]; }; then usage; fi
+if [ "$publish" = 1 ] && [ -z "$audio" ]; then
+  echo "--publish needs --audio FILE --work DIR: the package check must pass on this tarball first" >&2
+  exit 2
+fi
+if [ -n "$audio" ]; then
+  [ -f "$audio" ] || { echo "no audio file at $audio" >&2; exit 2; }
+  [ ! -e "$work" ] || [ -z "$(ls -A "$work")" ] || { echo "$work is not empty" >&2; exit 2; }
+fi
 
 repo="juliusbramers/transcribe-multi-speaker-macos"
 version="$(sed -n 's/.*string = "\([0-9]*\.[0-9]*\.[0-9]*\)".*/\1/p' Sources/TMSM/Version.swift)"
@@ -162,6 +188,14 @@ step "tarball and SHA256SUMS"
 (cd "$dist" && grep " $tarball\$" SHA256SUMS | shasum -a 256 -c -)
 rm -rf "$dist/$name"
 ls -l "$dist"
+
+if [ -n "$audio" ]; then
+  step "package check on this tarball (fast, $(basename "$audio"))"
+  TMSM_TARBALL="$dist/$tarball" scripts/package-check.sh "$work" "$audio" fast || {
+    echo "refused: the package check failed on $tarball; nothing was published" >&2
+    exit 1
+  }
+fi
 
 notes="tmsm $version for macOS on Apple silicon. Unsigned: install with the line in README.md, which checks the download against SHA256SUMS."
 

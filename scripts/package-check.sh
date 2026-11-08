@@ -20,7 +20,7 @@ if security find-generic-password -s tmsm >/dev/null 2>&1; then
   exit 1
 fi
 [ ! -e "$work" ] || [ -z "$(ls -A "$work")" ] || { echo "$work is not empty" >&2; exit 1; }
-tarball="$(ls dist/tmsm-*-macos-arm64.tar.gz 2>/dev/null | head -1)"
+tarball="${TMSM_TARBALL:-$(ls dist/tmsm-*-macos-arm64.tar.gz 2>/dev/null | head -1)}"
 [ -n "$tarball" ] || { echo "no tarball in dist/; run scripts/release.sh first" >&2; exit 1; }
 mkdir -p "$work/home" "$work/unpack" "$work/out"
 work="$(cd "$work" && pwd)"
