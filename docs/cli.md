@@ -193,9 +193,11 @@ OPTIONS:
 ```text
 Presets (tmsm setup --preset <name>):
   fast        Parakeet Ultra + Nemotron-3 offline, speakers by overlap; peak RAM 0.4 GB
-              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
+              820 MB download: parakeet-ultra, nemotron3-offline
+              other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
 * default     Parakeet Ultra + Nemotron-3 offline, decoded speaker turn by speaker turn; peak RAM 0.4 GB
-              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
+              820 MB download: parakeet-ultra, nemotron3-offline
+              other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
   accurate    Parakeet Ultra for en/de, Qwen3-ASR 1.7B 8-bit for other languages, turn by turn; peak RAM 0.4–6.2 GB
               4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
   extreme     Currently identical to accurate: no larger pipeline measured better with v0.1.0 engines; peak RAM 0.4–6.2 GB

@@ -22,12 +22,25 @@ public struct ModelSetup: Sendable {
   /// Presets plus `individual`, in catalogue order.
   public var choices: [String] { catalogue.presetNames + [Config.individual] }
 
-  /// Every catalogue entry a preset may run (routes, language detectors, speakers).
+  /// Every catalogue entry a preset may run (routes, language detectors, speakers): what
+  /// "delete unused models" keeps, including fallbacks a run fetched on its own.
   public static func modelIDs(_ preset: Preset) -> [String] { preset.entries }
 
-  public func downloadMB(_ preset: Preset) -> Int {
-    Self.modelIDs(preset).compactMap { try? catalogue.entry($0).downloadMB }.reduce(0, +)
+  /// What setup downloads for a preset (see `Preset.setupEntries`).
+  public func setupIDs(_ preset: Preset) -> [String] { preset.setupEntries(in: catalogue) }
+
+  /// Models a run may still fetch in a language setup didn't prepare for.
+  public func laterIDs(_ preset: Preset) -> [String] {
+    let now = setupIDs(preset)
+    return Self.modelIDs(preset).filter { !now.contains($0) }
   }
+
+  func megabytes(_ ids: [String]) -> Int {
+    ids.compactMap { try? catalogue.entry($0).downloadMB }.reduce(0, +)
+  }
+
+  /// The setup download.
+  public func downloadMB(_ preset: Preset) -> Int { megabytes(setupIDs(preset)) }
 
   /// The one place that describes a preset's footprint: its measured peak RAM, else the
   /// summary alone.
@@ -51,7 +64,13 @@ public struct ModelSetup: Sendable {
       lines.append("\(mark) \(pad(preset.name, width))  \(Self.memoryText(preset))")
       lines.append(
         "  \(pad("", width))  \(Self.size(downloadMB(preset))) download: "
-          + Self.modelIDs(preset).joined(separator: ", "))
+          + setupIDs(preset).joined(separator: ", "))
+      let later = laterIDs(preset)
+      if !later.isEmpty {
+        lines.append(
+          "  \(pad("", width))  other languages may add \(Self.size(megabytes(later))): "
+            + later.joined(separator: ", "))
+      }
     }
     let mark = inUse == Config.individual ? "*" : " "
     lines.append(
@@ -183,10 +202,10 @@ public struct ModelSetup: Sendable {
 
   // MARK: Downloading
 
-  /// Downloads every entry the preset may run, each through its engine's own `prepare`
-  /// (download bars on stderr), so later runs need no network.
+  /// Downloads what the preset needs for English and German, each entry through its engine's
+  /// own `prepare` (download bars on stderr). Other languages fetch their model on first use.
   public func prepare(_ preset: Preset, progress: Progress) async throws {
-    for id in Self.modelIDs(preset) {
+    for id in setupIDs(preset) {
       try await catalogue.entry(id).prepare(home, progress)
     }
   }
@@ -274,7 +293,7 @@ public struct ModelSetup: Sendable {
     }
     console.say(
       "Downloading \(preset.name) (\(Self.size(downloadMB(preset)))): "
-        + Self.modelIDs(preset).joined(separator: ", "))
+        + setupIDs(preset).joined(separator: ", "))
     do {
       try await prepare(preset, progress: progress)
       progress.finish()

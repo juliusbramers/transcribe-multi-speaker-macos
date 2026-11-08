@@ -87,7 +87,7 @@ tmsm reads m4a, mp3, WhatsApp ogg/opus, wav, flac, and the audio in mp4/mov. Opu
 
 `tmsm setup` asks once for the quality you want. `--preset` overrides that choice for one run. `tmsm setup --list` shows each preset's models, RAM and download size, read from the program itself. `individual` lets you pick any speech-to-text model and any speaker model from the catalogue. A gated model asks once for a Hugging Face token, which is typed in hidden and kept in your Keychain.
 
-Every preset picks its speech model by the file's language. So setup downloads each model a preset may need, including Qwen3-ASR for languages Parakeet doesn't cover. [docs/models.md](docs/models.md) lists every preset and model with measured RAM, download size, languages, licences and the pinned Hugging Face commits.
+Every preset picks its speech model by the file's language. Setup downloads what English and German need: 820 MB for `fast` and `default`, 4.6 GB for `accurate` and `extreme`. A file in a language Parakeet doesn't cover fetches Qwen3-ASR (3.7 GB) on its first run, with a note on stderr. `tmsm setup --list` shows both figures. [docs/models.md](docs/models.md) lists every preset and model with measured RAM, download size, languages, licences and the pinned Hugging Face commits.
 
 ## Command-line reference and scripting
 

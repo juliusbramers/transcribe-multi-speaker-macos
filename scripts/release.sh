@@ -72,8 +72,10 @@ for dep in $(otool -L "$bin/tmsm" | tail -n +2 | awk '$1 ~ /^@rpath\// { print s
     if [ -f "$dir/$dep" ]; then found="$dir/$dep"; break; fi
   done
   [ -n "$found" ] || { echo "can't find $dep in the toolchain to ship it" >&2; exit 1; }
-  cp "$found" "$dist/$name/$dep"
-  echo "shipping $dep from $found"
+  # The toolchain's copy is universal; ship the arm64 slice only (its signature stays valid).
+  if [ "$(lipo -archs "$found")" = arm64 ]; then cp "$found" "$dist/$name/$dep"
+  else lipo "$found" -thin arm64 -output "$dist/$name/$dep"; fi
+  echo "shipping $dep (arm64) from $found"
 done
 cp NOTICE README.md "$dist/$name/"
 # The licence of every resolved package (MIT and Apache code is compiled into tmsm).

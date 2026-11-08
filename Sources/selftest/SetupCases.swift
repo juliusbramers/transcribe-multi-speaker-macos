@@ -240,6 +240,25 @@ enum SetupCases {
         setup.listing(current: Config()).contains("* default"), "no config: default is in use")
     }
 
+    t.test("setup: fast and default stay small; fallbacks come later, and stay kept") {
+      let real = ModelSetup(home: home, catalogue: .shared, environment: [:])
+      func ids(_ name: String) throws -> [String] {
+        real.setupIDs(try Catalogue.shared.preset(named: name))
+      }
+      t.expect(try ids("fast"), ["parakeet-ultra", "nemotron3-offline"])
+      t.expect(try ids("default"), ["parakeet-ultra", "nemotron3-offline"])
+      t.expect(try ids("accurate"), ["parakeet-ultra", "qwen3-asr-1.7b-8bit", "nemotron3-offline"])
+      t.expect(try ids("extreme"), ["parakeet-ultra", "qwen3-asr-1.7b-8bit", "nemotron3-offline"])
+      let fast = try Catalogue.shared.preset(named: "fast")
+      t.expect(real.laterIDs(fast), ["qwen3-asr-1.7b-8bit"])
+      t.expect(real.downloadMB(fast) < 1_000, "fast setup under 1 GB: \(real.downloadMB(fast)) MB")
+      t.expect(
+        ModelSetup.modelIDs(fast).contains("qwen3-asr-1.7b-8bit"),
+        "a fetched fallback counts as the preset's, so it is never offered for deletion")
+      let list = real.listing(current: Config())
+      t.expect(list.contains("other languages may add"), "--list names the later download")
+    }
+
     t.test("setup: a routed preset prepares every entry it may run, once each") {
       final class Log: @unchecked Sendable { var ids: [String] = [] }
       let log = Log()

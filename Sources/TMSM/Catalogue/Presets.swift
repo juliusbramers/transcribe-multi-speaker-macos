@@ -62,6 +62,32 @@ public struct Preset: Sendable, Equatable {
   }
 }
 
+extension Preset {
+  /// The languages `tmsm setup` prepares a preset for: a run in these, without `--language`,
+  /// needs nothing else. Other languages may fetch more models on first use.
+  public static let setupLanguages = ["en", "de"]
+
+  /// What `tmsm setup` downloads: the routes for `setupLanguages`, the first language detector
+  /// and the speaker model. Fallback routes and later detectors download when a run needs them.
+  public func setupEntries(in catalogue: Catalogue) -> [String] {
+    var ids: [String] = []
+    func add(_ id: String) { if !ids.contains(id) { ids.append(id) } }
+    if routing == nil {
+      add(transcription)
+    } else {
+      for language in Preset.setupLanguages {
+        if let (_, entry) = try? PresetRouting.route(self, language: language, catalogue: catalogue)
+        {
+          add(entry.id)
+        }
+      }
+      if let detector = routing?.detectors.first { add(detector) }
+    }
+    add(speakers)
+    return ids
+  }
+}
+
 /// Routes, in order of preference: the first whose languages include the file's language runs.
 public struct LanguageRouting: Sendable, Equatable {
   public struct Route: Sendable, Equatable {
