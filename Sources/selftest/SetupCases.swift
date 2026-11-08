@@ -11,7 +11,9 @@ enum SetupCases {
     unused(t)
     pathLine(t)
     program(t)
+    ownership(t)
     uninstall(t)
+    recovery(t)
     update(t)
     pipes(t)
     docs(t)
@@ -97,6 +99,14 @@ enum SetupCases {
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     try text.write(to: url, atomically: true, encoding: .utf8)
+  }
+
+  /// An installed program folder as `tmsm install` leaves it: `tmsm` plus its manifest.
+  static func fakeInstall(_ installer: Installer) throws {
+    try write("tmsm", installer.executable)
+    try write(
+      "# tmsm program folder\nitem tmsm\n",
+      installer.programFolder.appendingPathComponent(Installer.manifestName))
   }
 
   static func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
@@ -230,15 +240,25 @@ enum SetupCases {
       t.expect(console.said.isEmpty, "no question")
     }
 
-    t.test("token: no token and no terminal fails with a hint, ungated needs none") {
-      // Holds only if no real token is stored under service "tmsm"; skip otherwise.
-      guard Credentials.stored() == nil else { return }
+    t.test("token: no terminal means no Keychain access; HF_TOKEN or a clear error") {
       let setup = ModelSetup(home: home, catalogue: catalogue, environment: [:])
       expectError(t, SetupError.tokenMissing("ASR-GATED")) {
         try setup.ensureToken(for: gated, console: Scripted([], interactive: false))
       }
+      expectError(t, SetupError.tokenMissing("M")) {
+        try Credentials.exportToken(for: "M", environment: [:], attended: false)
+      }
+      t.expect(try Credentials.token(environment: [:], attended: false), nil)
+      t.expect(
+        try Credentials.token(environment: ["HF_TOKEN": "hf_x"], attended: false), "hf_x")
       try setup.ensureToken(
         for: catalogue.preset(named: "fast"), console: Scripted([], interactive: false))
+    }
+
+    t.test("token: an empty answer at the hidden prompt cancels") {
+      // Reads the real Keychain (read-only); holds only if no token is stored there.
+      guard (try? Credentials.stored()) == nil else { return }
+      let setup = ModelSetup(home: home, catalogue: catalogue, environment: [:])
       expectError(t, SetupError.cancelled) {
         try setup.ensureToken(for: gated, console: Scripted([], hidden: ["", "x"]))
       }
@@ -255,11 +275,11 @@ enum SetupCases {
     if ProcessInfo.processInfo.environment["TMSM_KEYCHAIN_TEST"] == "1" {
       t.test("token: Keychain store, read, replace, remove (TMSM_KEYCHAIN_TEST=1)") {
         try Credentials.store("hf_selftest0001")
-        t.expect(Credentials.stored(), "hf_selftest0001")
+        t.expect(try Credentials.stored(), "hf_selftest0001")
         try Credentials.store("hf_selftest0002")
-        t.expect(Credentials.stored(), "hf_selftest0002")
+        t.expect(try Credentials.stored(), "hf_selftest0002")
         t.expect(try Credentials.removeAll(), 1)
-        t.expect(Credentials.stored(), nil)
+        t.expect(try Credentials.stored(), nil)
       }
     }
   }
@@ -336,7 +356,10 @@ enum SetupCases {
         Installer(environment: ["HOME": "/h", "SHELL": "/bin/bash"]).profile.path,
         "/h/.bash_profile")
       t.expect(
-        Installer(environment: ["HOME": "/h", "SHELL": "/usr/bin/fish"]).profile.path, "/h/.profile"
+        Installer(environment: ["HOME": "/h", "SHELL": "/usr/bin/fish"]).profile.path,
+        "/h/.config/fish/conf.d/tmsm.fish")
+      t.expect(
+        Installer(environment: ["HOME": "/h", "SHELL": "/bin/ksh"]).profile.path, "/h/.profile"
       )
       t.expect(zsh.programFolder.path, "/h/.tmsm")
     }
@@ -432,7 +455,7 @@ enum SetupCases {
       t.expect(try installer.installProgram(from: release), true)
       t.expect(
         try FileManager.default.contentsOfDirectory(atPath: installer.programFolder.path).sorted(),
-        ["NOTICE", "mlx.metallib", "tmsm", "x.bundle"])
+        [".tmsm-program", "NOTICE", "mlx.metallib", "tmsm", "x.bundle"])
       try write("v2", release.appendingPathComponent("tmsm"))
       try FileManager.default.removeItem(at: release.appendingPathComponent("NOTICE"))
       try installer.installProgram(from: release)
@@ -454,13 +477,101 @@ enum SetupCases {
       }
       let installer = Installer(environment: ["HOME": dir.path])
       try write("mine", installer.programFolder.appendingPathComponent("diary.txt"))
-      try write("tmsm", installer.programFolder.appendingPathComponent("tmsm"))
+      try fakeInstall(installer)
       let release = dir.appendingPathComponent("release")
       try write("tmsm", release.appendingPathComponent("tmsm"))
       expectError(t, SetupError.foreignFiles(installer.programFolder.path, ["diary.txt"])) {
         try installer.installProgram(from: release)
       }
       t.expect(read(installer.programFolder.appendingPathComponent("diary.txt")), "mine")
+    }
+  }
+
+  static func ownership(_ t: Runner) {
+    t.test("install: a ~/.tmsm or staging folder without manifest is not ours") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let installer = Installer(environment: ["HOME": dir.path])
+      let release = dir.appendingPathComponent("release")
+      try write("tmsm", release.appendingPathComponent("tmsm"))
+      // A stranger's .tmsm.new with names that look like program files.
+      let stray = dir.appendingPathComponent(".tmsm.new")
+      try write("mine", stray.appendingPathComponent("README.md"))
+      expectError(t, SetupError.notOwned(stray.path)) {
+        try installer.installProgram(from: release)
+      }
+      t.expect(read(stray.appendingPathComponent("README.md")), "mine")
+      try FileManager.default.removeItem(at: stray)
+      try write("mine", installer.programFolder.appendingPathComponent("README.md"))
+      expectError(t, SetupError.notOwned(installer.programFolder.path)) {
+        try installer.installProgram(from: release)
+      }
+    }
+
+    t.test("install: a legacy ~/.tmsm (ours, no manifest) is taken over") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let installer = Installer(environment: ["HOME": dir.path])
+      try write("old", installer.executable)
+      chmod(installer.executable.path, 0o755)
+      try write(
+        "tmsm — transcribe multi-speaker audio on macOS\n",
+        installer.programFolder.appendingPathComponent("NOTICE"))
+      let release = dir.appendingPathComponent("release")
+      try write("new", release.appendingPathComponent("tmsm"))
+      t.expect(try installer.installProgram(from: release), true)
+      t.expect(read(installer.executable), "new")
+      t.expect(exists(installer.manifest), true)
+    }
+
+    t.test("path: bash gets the first login file that exists, and the manifest records it") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      try write("PATH=/opt/bin:$PATH\n", dir.appendingPathComponent(".profile"))
+      let installer = Installer(environment: ["HOME": dir.path, "SHELL": "/bin/bash"])
+      t.expect(installer.profile.lastPathComponent, ".profile")
+      try fakeInstall(installer)
+      try installer.addPathLine()
+      t.expect(exists(dir.appendingPathComponent(".bash_profile")), false, "would hide .profile")
+      t.expect(
+        read(dir.appendingPathComponent(".profile")),
+        "PATH=/opt/bin:$PATH\n" + Installer.pathLine + "\n")
+      t.expect(read(installer.manifest)?.contains("profile \(dir.path)/.profile"), true)
+      try write("", dir.appendingPathComponent(".bash_login"))
+      t.expect(installer.profile.lastPathComponent, ".bash_login", ".bash_login comes first")
+    }
+
+    t.test("path: fish gets an owned conf.d snippet; uninstall removes it and its new folders") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let installer = Installer(environment: ["HOME": dir.path, "SHELL": "/opt/homebrew/bin/fish"])
+      try fakeInstall(installer)
+      try write("export A=1\n" + Installer.pathLine + "\n", dir.appendingPathComponent(".zprofile"))
+      t.expect(try installer.addPathLine(), true)
+      t.expect(read(installer.fishFile), Installer.fishSnippet)
+      t.expect(read(dir.appendingPathComponent(".zprofile")), "export A=1\n", "the line moved")
+      t.expect(try installer.addPathLine(), false)
+      try installer.removePathLines()
+      t.expect(exists(dir.appendingPathComponent(".config")), false, "created folders go")
+
+      try write("set -x EDITOR vim\n", installer.fishFile)  // someone else's tmsm.fish
+      expectError(t, SetupError.foreignFiles(installer.fishFile.path, ["tmsm.fish"])) {
+        try installer.addPathLine()
+      }
+      t.expect(read(installer.fishFile), "set -x EDITOR vim\n")
+    }
+
+    t.test("path: the fish snippet is valid fish") {
+      guard let fish = AudioDecoder.findExecutable("fish", path: "/opt/homebrew/bin:/usr/local/bin")
+      else { return }
+      let out = try Updater.run(
+        fish.path,
+        [
+          "--no-config", "-c",
+          "set -gx HOME /h; set -gx PATH /usr/bin; \(Installer.fishSnippet)\necho $PATH",
+        ],
+        in: nil)
+      t.expect(out, "/h/.tmsm /usr/bin\n")
     }
   }
 
@@ -481,7 +592,7 @@ enum SetupCases {
       try write("c", caches.appendingPathComponent("e5"))
       try write("keep", other)
       try write("export A=1\n", userHome.appendingPathComponent(".zprofile"))
-      try write("tmsm", installer.executable)
+      try fakeInstall(installer)
       try installer.addPathLine()
 
       let uninstaller = Uninstaller(home: home, installer: installer, leftovers: [caches])
@@ -533,7 +644,7 @@ enum SetupCases {
       try write("{}", shared.appendingPathComponent("config.json"))
       try write("", shared.appendingPathComponent(Uninstaller.markerName))
       let installer = Installer(environment: ["HOME": dir.path])
-      try write("tmsm", installer.executable)
+      try fakeInstall(installer)
       let uninstaller = Uninstaller(
         home: TMSMHome(root: shared), installer: installer, leftovers: [])
       let errors = uninstaller.run(uninstaller.plan().filter { $0 != .keychain })
@@ -573,6 +684,99 @@ enum SetupCases {
       try Uninstaller.claim(standard, environment: env)
       t.expect(
         exists(standard.root.appendingPathComponent(Uninstaller.markerName)), true, "default")
+    }
+  }
+
+  // MARK: Recovery uninstall (scripts/uninstall.sh)
+
+  static func recovery(_ t: Runner) {
+    let script = repo.appendingPathComponent("scripts/uninstall.sh")
+
+    /// Installs the way `tmsm install` does, into a temp HOME, for `shell`.
+    func installed(_ dir: URL, shell: String) throws -> (Installer, TMSMHome) {
+      let home = dir.appendingPathComponent("home")
+      let env = ["HOME": home.path, "SHELL": shell]
+      let installer = Installer(environment: env)
+      let release = dir.appendingPathComponent("release")
+      for name in ["tmsm", "NOTICE", "uninstall.sh"] {
+        try write(name, release.appendingPathComponent(name))
+      }
+      try installer.installProgram(from: release)
+      try installer.addPathLine()
+      let tmsmHome = TMSMHome.resolve(environment: env)
+      try Uninstaller.claim(tmsmHome, environment: env)
+      try write("{}", tmsmHome.configFile)
+      try write("w", tmsmHome.models.appendingPathComponent("x/m"))
+      return (installer, tmsmHome)
+    }
+
+    func runScript(_ dir: URL, _ extra: [String: String] = [:]) throws -> Int32 {
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = [script.path]
+      var env = [
+        "HOME": dir.appendingPathComponent("home").path, "PATH": "/usr/bin:/bin:/usr/sbin",
+        "TMSM_SKIP_KEYCHAIN": "1",
+        "TMSM_ACCOUNT_HOME": dir.appendingPathComponent("account").path,
+      ]
+      env.merge(extra) { $1 }
+      process.environment = env
+      process.standardError = FileHandle.nullDevice
+      try process.run()
+      process.waitUntilExit()
+      return process.terminationStatus
+    }
+
+    for shell in ["/bin/zsh", "/bin/bash", "/opt/homebrew/bin/fish"] {
+      t.test("recovery: uninstall.sh leaves an empty HOME after a \(shell) install") {
+        let dir = tempFolder()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        _ = try installed(dir, shell: shell)
+        let caches = dir.appendingPathComponent("account/Library/Caches/tmsm/x")
+        try write("c", caches)
+        t.expect(try runScript(dir), 0)
+        let left = try FileManager.default.contentsOfDirectory(
+          atPath: dir.appendingPathComponent("home").path)
+        t.expect(left, [], "left in HOME")
+        t.expect(exists(caches), false, "account cache")
+      }
+    }
+
+    t.test("recovery: uninstall.sh refuses what isn't provably tmsm's, removes the rest") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let (installer, tmsmHome) = try installed(dir, shell: "/bin/zsh")
+      try write("mine", installer.programFolder.appendingPathComponent("diary.txt"))
+      try write("mine", tmsmHome.root.appendingPathComponent("thesis.pages"))
+      let stray = dir.appendingPathComponent("home/.tmsm.new")
+      try write("mine", stray.appendingPathComponent("README.md"))
+      // A profile kept in a dotfiles folder, linked in.
+      let target = dir.appendingPathComponent("dotfiles/zprofile")
+      let profile = dir.appendingPathComponent("home/.zprofile")
+      try write("export A=1\n" + Installer.pathLine + "\n", target)
+      try FileManager.default.removeItem(at: profile)
+      try FileManager.default.createSymbolicLink(at: profile, withDestinationURL: target)
+
+      t.expect(try runScript(dir), 1, "exit 1 when something was left alone")
+      t.expect(read(installer.programFolder.appendingPathComponent("diary.txt")), "mine")
+      t.expect(read(tmsmHome.root.appendingPathComponent("thesis.pages")), "mine")
+      t.expect(read(stray.appendingPathComponent("README.md")), "mine")
+      t.expect(read(target), "export A=1\n", "line removed through the link")
+      t.expect(
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: profile.path)) != nil,
+        "still a link")
+    }
+
+    t.test("recovery: a TMSM_HOME tmsm did not create is left alone") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let project = dir.appendingPathComponent("project")
+      try write("{}", project.appendingPathComponent("config.json"))
+      try write("w", project.appendingPathComponent("models/mine.bin"))
+      try FileManager.default.createDirectory(
+        at: dir.appendingPathComponent("home"), withIntermediateDirectories: true)
+      t.expect(try runScript(dir, ["TMSM_HOME": project.path]), 1)
+      t.expect(read(project.appendingPathComponent("models/mine.bin")), "w")
     }
   }
 
@@ -785,8 +989,11 @@ enum SetupCases {
             quoted.trimmingCharacters(in: .newlines) == actual,
             "\(doc): `tmsm \(args.joined(separator: " "))` differs; run scripts/docs-reference.sh")
         }
-        // Only lines about tmsm: `xcode-select --install` is not ours to check.
-        let ours = text.components(separatedBy: "\n").filter { $0.contains("tmsm") }
+        // Only lines about tmsm: `xcode-select --install` and the install line's curl flags
+        // are not ours to check.
+        let ours = text.components(separatedBy: "\n").filter {
+          $0.contains("tmsm") && !$0.contains("curl ")
+        }
         let unknown = flags(ours.joined(separator: "\n")).subtracting(flags(helpText))
         t.expect(unknown.isEmpty, "\(doc) names flags tmsm doesn't have: \(unknown.sorted())")
       }

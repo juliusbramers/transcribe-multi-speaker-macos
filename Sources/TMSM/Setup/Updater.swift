@@ -13,8 +13,16 @@ public struct Updater {
   public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
     releases =
       environment["TMSM_RELEASES"] ?? "https://github.com/\(Updater.repository)/releases"
-    runner = Updater.run
+    runner = { tool, arguments, cwd in
+      // curl has its own limits (see `curlLimits`); this outer bound only catches a hang.
+      try Updater.run(tool, arguments, in: cwd, timeout: tool.hasSuffix("curl") ? 3_700 : 600)
+    }
   }
+
+  /// No connection in 20 s, or under 1 KB/s for a minute, or over an hour: give up.
+  static let curlLimits = [
+    "--connect-timeout", "20", "--speed-limit", "1024", "--speed-time", "60", "--max-time", "3600",
+  ]
 
   public static func assetName(_ version: String) -> String {
     "tmsm-\(version)-macos-arm64.tar.gz"
@@ -24,7 +32,8 @@ public struct Updater {
   public func latestVersion() throws -> String {
     let url = try runner(
       "/usr/bin/curl",
-      ["-fsSLI", "-o", "/dev/null", "-w", "%{url_effective}", "\(releases)/latest"], nil)
+      ["-fsSLI"] + Updater.curlLimits
+        + ["-o", "/dev/null", "-w", "%{url_effective}", "\(releases)/latest"], nil)
     guard let version = Updater.version(fromTagURL: url) else {
       throw SetupError.download("can't tell the latest version from \(url)")
     }
@@ -58,7 +67,7 @@ public struct Updater {
     let base = "\(releases)/download/v\(version)"
     for name in [asset, "SHA256SUMS"] {
       _ = try runner(
-        "/usr/bin/curl", ["-fsSL", "-o", name, "\(base)/\(name)"], folder)
+        "/usr/bin/curl", ["-fsSL"] + Updater.curlLimits + ["-o", name, "\(base)/\(name)"], folder)
     }
     let sums = try String(
       contentsOf: folder.appendingPathComponent("SHA256SUMS"), encoding: .utf8)
@@ -76,8 +85,12 @@ public struct Updater {
     return folder.appendingPathComponent("tmsm-\(version)-macos-arm64", isDirectory: true)
   }
 
-  /// Runs a tool and returns its stdout; a non-zero exit throws with its stderr.
-  public static func run(_ tool: String, _ arguments: [String], in cwd: URL?) throws -> String {
+  /// Runs a tool and returns its stdout; a non-zero exit throws with its stderr. Both
+  /// streams are drained at the same time (a full stderr pipe can't stall the tool), and a tool
+  /// still running after `timeout` seconds is stopped.
+  public static func run(
+    _ tool: String, _ arguments: [String], in cwd: URL?, timeout: TimeInterval = 600
+  ) throws -> String {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: tool)
     process.arguments = arguments
@@ -86,16 +99,35 @@ public struct Updater {
     let err = Pipe()
     process.standardOutput = out
     process.standardError = err
+    process.standardInput = FileHandle.nullDevice
+    let exited = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in exited.signal() }
     try process.run()
-    let output = out.fileHandleForReading.readDataToEndOfFile()
-    let errors = err.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-      let message = String(decoding: errors, as: UTF8.self)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      throw SetupError.download(
-        "\(URL(fileURLWithPath: tool).lastPathComponent) \(arguments.last ?? ""): \(message)")
+
+    final class Buffer: @unchecked Sendable { var data = Data() }
+    let output = Buffer()
+    let errors = Buffer()
+    let drained = DispatchGroup()
+    for (pipe, buffer) in [(out, output), (err, errors)] {
+      drained.enter()
+      DispatchQueue.global().async {
+        buffer.data = pipe.fileHandleForReading.readDataToEndOfFile()
+        drained.leave()
+      }
     }
-    return String(decoding: output, as: UTF8.self)
+    let name = URL(fileURLWithPath: tool).lastPathComponent
+    if exited.wait(timeout: .now() + timeout) == .timedOut {
+      process.terminate()
+      if exited.wait(timeout: .now() + 5) == .timedOut { kill(process.processIdentifier, SIGKILL) }
+      _ = drained.wait(timeout: .now() + 5)
+      throw SetupError.download("\(name) took longer than \(Int(timeout)) s and was stopped")
+    }
+    _ = drained.wait(timeout: .now() + 30)
+    guard process.terminationStatus == 0 else {
+      let message = String(decoding: errors.data, as: UTF8.self)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      throw SetupError.download("\(name) \(arguments.last ?? ""): \(message)")
+    }
+    return String(decoding: output.data, as: UTF8.self)
   }
 }

@@ -158,9 +158,9 @@ public struct ModelSetup: Sendable {
   /// For gated models: a token from HF_TOKEN, the Keychain, or typed in (hidden) and stored.
   public func ensureToken(for preset: Preset, console: Console) throws {
     let gated = try Self.modelIDs(preset).map(catalogue.entry).filter(\.gated)
-    guard let first = gated.first, Credentials.token(environment: environment) == nil else {
-      return
-    }
+    guard let first = gated.first,
+      try Credentials.token(environment: environment, attended: console.isInteractive) == nil
+    else { return }
     guard console.isInteractive else { throw SetupError.tokenMissing(first.name) }
     console.say(
       "\(first.name) is gated on Hugging Face. Accept its terms on huggingface.co, then paste "
@@ -258,7 +258,8 @@ public struct ModelSetup: Sendable {
     if let first = try Self.modelIDs(preset).map(catalogue.entry)
       .first(where: \.gated)
     {
-      try Credentials.exportToken(for: first.name, environment: environment)
+      try Credentials.exportToken(
+        for: first.name, environment: environment, attended: console.isInteractive)
     }
     console.say("Downloading \(preset.name): \(preset.transcription) + \(preset.speakers)")
     do {

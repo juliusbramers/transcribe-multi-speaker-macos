@@ -4,29 +4,34 @@
 
 ## Install
 
-Paste this line into Terminal (macOS 15 or later, Apple silicon):
+Paste this line into Terminal. It works from zsh, bash and fish.
 
 ```sh
-d="$(mktemp -d)" && cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO "$r/download/v$v/$f" && curl -fsSL "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install; cd ~ && rm -rf "$d"
+/bin/sh -c 'd="$(mktemp -d)" || exit 1; trap "rm -rf \"$d\"" EXIT; trap "exit 130" HUP INT TERM; cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI --connect-timeout 20 -o /dev/null -w "%{url_effective}" "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO --connect-timeout 20 "$r/download/v$v/$f" && curl -fsSL --connect-timeout 20 "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install'
 ```
+
+Built for macOS 15 or later on Apple silicon. Tested on macOS 27.
 
 ### For agents and scripts
 
-The same steps, then straight to Markdown on stdout: no file, no questions, missing models downloaded on the way. Everything else, including the checksum line, goes to stderr, and the transcription runs only if the install succeeded:
+The same steps, then straight to Markdown on stdout: no file, no questions, and missing models downloaded on the way. Everything else, including the checksum line, goes to stderr. The transcription runs only if the install succeeded:
 
 ```sh
-d="$(mktemp -d)" && (cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO "$r/download/v$v/$f" && curl -fsSL "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install --no-setup) >&2; s=$?; rm -rf "$d"; [ "$s" -eq 0 ] && ~/.tmsm/tmsm ~/memo.m4a --output - --quiet
+/bin/sh -c 'exec >&2; d="$(mktemp -d)" || exit 1; trap "rm -rf \"$d\"" EXIT; trap "exit 130" HUP INT TERM; cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI --connect-timeout 20 -o /dev/null -w "%{url_effective}" "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO --connect-timeout 20 "$r/download/v$v/$f" && curl -fsSL --connect-timeout 20 "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install --no-setup' && ~/.tmsm/tmsm ~/memo.m4a --output - --quiet
 ```
 
 Add `> memo.md` to keep the transcript. After that, `cat memo.m4a | tmsm - --output - --quiet` works too. [docs/cli.md](docs/cli.md) has the pipes, exit codes and the determinism guarantee.
 
 ### What the install line does
 
-- It finds the latest release on this repository's Releases page and downloads its tarball into a temporary folder.
+- It runs in its own `/bin/sh`, whatever your shell is, and works in a temporary folder that is removed at the end, even after an error or Ctrl-C. Its exit status is the install's.
+- It finds the latest release on this repository's Releases page and downloads its tarball.
 - It checks the tarball against `SHA256SUMS` with `shasum -c` before anything is unpacked or run.
-- It runs `tmsm install`, which puts the program in `~/.tmsm` and adds one line, marked `# tmsm`, to your login profile (`~/.zprofile` for zsh) so `tmsm` is on your `PATH`.
+- It runs `tmsm install`. This puts the program in `~/.tmsm`, with a manifest of its files, and adds `~/.tmsm` to your `PATH`:
+  - zsh: one line, marked `# tmsm`, in `~/.zprofile`;
+  - bash: the same line in the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile` that exists;
+  - fish: the snippet `~/.config/fish/conf.d/tmsm.fish`.
 - It then asks for a quality preset and downloads its models from Hugging Face. Nothing else is downloaded until you choose.
-- It removes the temporary folder.
 
 The builds are not signed. A copy fetched with `curl` carries no quarantine mark, so macOS starts it without a dialog. A copy downloaded in a browser is blocked until you clear the mark once: `xattr -dr com.apple.quarantine <folder>`.
 
@@ -44,13 +49,23 @@ This runs the same steps: download, `SHA256SUMS` check, install. Your models and
 tmsm uninstall
 ```
 
-This removes the program (`~/.tmsm`), every model, the config and the caches (`~/Library/Application Support/tmsm`, or `TMSM_HOME` if you set one), the Keychain item `tmsm`, the `PATH` line, and the two folders macOS creates for the `tmsm` process (`~/Library/Caches/tmsm`, `~/Library/HTTPStorages/tmsm`). Your transcripts stay. Nothing that belongs to another app is touched.
+This removes the following:
 
-If `tmsm` no longer starts, this line removes the same things (for the default home):
+- the program (`~/.tmsm`);
+- every model, the config and the caches (`~/Library/Application Support/tmsm`, or `TMSM_HOME` if you set one);
+- the Keychain item `tmsm`;
+- the `PATH` line or fish snippet;
+- the two folders macOS creates for the `tmsm` process (`~/Library/Caches/tmsm`, `~/Library/HTTPStorages/tmsm`).
+
+Your transcripts stay. tmsm removes only what it can prove is its own: a home it created (marked `.tmsm-home`), a program folder with its manifest, lines marked `# tmsm`. It leaves anything uncertain alone, says so, and exits with `1`.
+
+If `tmsm` no longer starts, the recovery script installed beside it does the same, with the same checks:
 
 ```sh
-/bin/sh -c 'rm -rf "$HOME/.tmsm" "$HOME/.tmsm.new" "$HOME/.tmsm.old" "$HOME/Library/Application Support/tmsm" "$HOME/Library/Caches/tmsm" "$HOME/Library/HTTPStorages/tmsm"; security delete-generic-password -s tmsm >/dev/null 2>&1; for f in "$HOME/.zprofile" "$HOME/.bash_profile" "$HOME/.profile"; do [ -f "$f" ] && sed -i "" "/\/\.tmsm:.*# tmsm$/d" "$f"; done; echo "tmsm removed."'
+/bin/sh ~/.tmsm/uninstall.sh
 ```
+
+If `~/.tmsm` itself is gone, the same script is in every release tarball and at `scripts/uninstall.sh` in this repository.
 
 ## Quick start
 

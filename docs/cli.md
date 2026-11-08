@@ -69,13 +69,13 @@ tmsm setup --list                                            # presets and model
 ```
 
 - With options, setup keeps models it no longer needs unless you pass `--delete-unused`. A gated model without a token is an error that names `HF_TOKEN`; setup never prompts.
-- A gated model needs a Hugging Face token. Pass it as `HF_TOKEN`. Agents never get the hidden prompt. A person running `tmsm setup` types it once, and it is kept in the Keychain under service `tmsm`. `HF_TOKEN` wins over the Keychain.
+- A gated model needs a Hugging Face token. Pass it as `HF_TOKEN`. A person running `tmsm setup` types it once, hidden, and it is kept in the Keychain (service `tmsm`, account `huggingface`). `HF_TOKEN` wins over the Keychain. A process without a terminal on stdin and stderr never reads the Keychain, because macOS may show a dialog for it. Such a process needs `HF_TOKEN`, and without it the run fails with a message that says so.
 
 ## Install, update, uninstall
 
-- `tmsm install`, run from an unpacked release, copies the program to `~/.tmsm` and adds one `PATH` line, marked `# tmsm`, to the login profile. It prints the installed executable's path. `--no-setup` skips the preset question.
-- `tmsm update` downloads the latest release, checks it against `SHA256SUMS`, and installs it. `tmsm update --check` prints the latest version and exits `0` only if it is newer. `--to <version>` installs a given version.
-- `tmsm uninstall --yes` removes the following, without asking: the tmsm home, the program, the `PATH` line, the Keychain item, and `~/Library/Caches/tmsm` and `~/Library/HTTPStorages/tmsm`. Without a terminal, `--yes` is required. A tmsm home is removed only if tmsm created it (or it is the default location) and nothing else is in it. If `TMSM_HOME` names a folder that existed before tmsm, or one that holds other files, that folder is left alone, the rest is removed, and the exit code is `1`.
+- `tmsm install`, run from an unpacked release, copies the program to `~/.tmsm` with a manifest (`.tmsm-program`) and puts `~/.tmsm` on `PATH`: one line marked `# tmsm` in `~/.zprofile` (zsh), in the first existing of `~/.bash_profile`, `~/.bash_login`, `~/.profile` (bash), or in `~/.profile` (other shells); for fish, the snippet `conf.d/tmsm.fish`. It prints the installed executable's path. `--no-setup` skips the preset question.
+- `tmsm update` downloads the latest release, checks it against `SHA256SUMS`, and installs it. A download that can't connect within 20 s, or stays under 1 KB/s for a minute, stops with an error instead of hanging. `tmsm update --check` prints the latest version and exits `0` only if it is newer. `--to <version>` installs a given version.
+- `tmsm uninstall --yes` removes the following, without asking: the tmsm home, the program, the `PATH` line, the Keychain item, and `~/Library/Caches/tmsm` and `~/Library/HTTPStorages/tmsm`. Without a terminal, `--yes` is required. A tmsm home is removed only if tmsm created it (or it is the default location) and nothing else is in it. The program folder goes only with its manifest, and only if the manifest lists everything in it. If `TMSM_HOME` names a folder that existed before tmsm, or a folder holds other files, that folder is left alone, the rest is removed, and the exit code is `1`. `/bin/sh ~/.tmsm/uninstall.sh` does the same, with the same checks, when `tmsm` itself no longer starts.
 
 ## Environment
 
