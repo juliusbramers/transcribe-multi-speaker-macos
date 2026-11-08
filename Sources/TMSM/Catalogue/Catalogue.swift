@@ -21,6 +21,9 @@ public struct CatalogueEntry: Sendable {
   public var factory: Factory
   /// Where the model lives on disk, for setup's "delete models no longer needed".
   public var storage: @Sendable (TMSMHome) -> [URL]
+  /// Downloads everything the entry needs, without running it. Default: one run on 1 s of
+  /// silence (which downloads as a side effect); engines that can download directly override it.
+  public var prepare: @Sendable (TMSMHome, Progress) async throws -> Void
 
   public var kind: Kind {
     switch factory {
@@ -32,7 +35,8 @@ public struct CatalogueEntry: Sendable {
   public init(
     id: String, name: String, engine: String, languages: [String], downloadMB: Int,
     license: String, gated: Bool, factory: Factory,
-    storage: @escaping @Sendable (TMSMHome) -> [URL]
+    storage: @escaping @Sendable (TMSMHome) -> [URL],
+    prepare: (@Sendable (TMSMHome, Progress) async throws -> Void)? = nil
   ) {
     self.id = id
     self.name = name
@@ -43,6 +47,7 @@ public struct CatalogueEntry: Sendable {
     self.gated = gated
     self.factory = factory
     self.storage = storage
+    self.prepare = prepare ?? { home, progress in try await factory.runOnSilence(home, progress) }
   }
 }
 
@@ -59,8 +64,10 @@ public struct EngineRegistration: Sendable {
 
 public struct Catalogue: Sendable {
   public static let defaultPreset = "default"
-  /// Every engine tmsm ships. Session B appends the MLX registration here.
-  public static let registrations: [EngineRegistration] = [FluidAudioEngine.registration]
+  /// Every engine tmsm ships.
+  public static let registrations: [EngineRegistration] = [
+    FluidAudioEngine.registration, MLXEngine.registration,
+  ]
   public static let shared = Catalogue(registrations)
 
   public let entries: [CatalogueEntry]
@@ -86,5 +93,18 @@ public struct Catalogue: Sendable {
       throw TMSMError.unknownModel(id)
     }
     return entry
+  }
+}
+
+extension CatalogueEntry.Factory {
+  /// One run on 1 s of silence: loads (and so downloads) the model.
+  func runOnSilence(_ home: TMSMHome, _ progress: Progress) async throws {
+    let silence = Audio(samples: [Float](repeating: 0, count: Audio.sampleRate))
+    switch self {
+    case .transcription(let make):
+      _ = try await make(home).transcribe(silence, language: nil, progress: progress)
+    case .speakers(let make):
+      _ = try await make(home).label(silence, maxSpeakers: 4, progress: progress)
+    }
   }
 }
