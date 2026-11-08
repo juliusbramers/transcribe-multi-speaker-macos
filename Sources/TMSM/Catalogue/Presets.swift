@@ -1,23 +1,36 @@
 import Foundation
 
-/// A named pair of catalogue entries: one for speech to text, one for speakers.
+/// How speech and speakers are combined.
+public enum Strategy: String, Sendable, Equatable {
+  /// Transcribe the whole file in windows, label speakers, give each word the speaker whose
+  /// segments overlap it most.
+  case windows
+  /// Label speakers first, then transcribe each speaker turn on its own; every word takes its
+  /// turn's speaker.
+  case turnwise
+}
+
+/// A named combination of models: one speaker entry, and the transcription entry (with its
+/// strategy) chosen by the file's language.
 public struct Preset: Sendable, Equatable {
   public var name: String
-  /// Catalogue id of the transcription entry. For a routed preset this is the router's entry,
-  /// whose choices per language are in `routing`.
+  /// The main transcription entry (the first route's), for display.
   public var transcription: String
   public var speakers: String
   /// One line for the wizard and `--help`, without the RAM figure (that is `ramGB`).
   public var summary: String
-  /// Measured peak memory footprint of a whole run (short clip to 30 min), in GB; nil until
-  /// measured.
+  /// Measured peak memory footprint of a whole run (short clip to 30 min, with and without
+  /// language detection), in GB; nil until measured.
   public var ramGB: ClosedRange<Double>?
-  /// Per-language choice of transcription entry, for presets that route.
+  /// Which transcription entry and strategy run for which language. nil: always
+  /// `transcription` with `strategy`.
   public var routing: LanguageRouting?
+  /// The strategy when there is no routing.
+  public var strategy: Strategy
 
   public init(
     name: String, transcription: String, speakers: String, summary: String,
-    ramGB: ClosedRange<Double>?, routing: LanguageRouting? = nil
+    ramGB: ClosedRange<Double>?, routing: LanguageRouting? = nil, strategy: Strategy = .windows
   ) {
     self.name = name
     self.transcription = transcription
@@ -25,57 +38,112 @@ public struct Preset: Sendable, Equatable {
     self.summary = summary
     self.ramGB = ramGB
     self.routing = routing
+    self.strategy = strategy
+  }
+
+  /// Every catalogue entry a run of this preset may use (routes, detectors, speakers): what
+  /// setup downloads for it.
+  public var entries: [String] {
+    var all = routing?.entries ?? [transcription]
+    if !all.contains(transcription) { all.insert(transcription, at: 0) }
+    if !all.contains(speakers) { all.append(speakers) }
+    return all
+  }
+
+  /// A routed preset: `transcription` and `strategy` are the first route's.
+  public init(
+    name: String, speakers: String, summary: String, ramGB: ClosedRange<Double>?,
+    routing: LanguageRouting
+  ) {
+    self.init(
+      name: name, transcription: routing.routes.first?.entry ?? "", speakers: speakers,
+      summary: summary, ramGB: ramGB, routing: routing,
+      strategy: routing.routes.first?.strategy ?? .windows)
   }
 }
 
-/// Which transcription entry runs for which language. Languages are ISO 639-1 codes.
+/// Routes, in order of preference: the first whose languages include the file's language runs.
 public struct LanguageRouting: Sendable, Equatable {
-  public var byLanguage: [String: String]
-  /// The entry for every language not in `byLanguage`, and for detecting the language.
-  public var fallback: String
+  public struct Route: Sendable, Equatable {
+    public var entry: String
+    public var strategy: Strategy
+    /// Only these languages (ISO 639-1); nil: every language the entry supports.
+    public var only: [String]?
+    /// Shown on stderr (unless --quiet) when this route runs.
+    public var note: String?
 
-  public init(byLanguage: [String: String], fallback: String) {
-    self.byLanguage = byLanguage
-    self.fallback = fallback
+    public init(
+      _ entry: String, _ strategy: Strategy, only: [String]? = nil, note: String? = nil
+    ) {
+      self.entry = entry
+      self.strategy = strategy
+      self.only = only
+      self.note = note
+    }
   }
 
-  public func entry(for language: String) -> String {
-    byLanguage[language] ?? fallback
+  public var routes: [Route]
+  /// Entries that detect the language when none is given, tried in order until one is sure.
+  public var detectors: [String]
+
+  public init(routes: [Route], detectors: [String]) {
+    self.routes = routes
+    self.detectors = detectors
   }
 
-  /// Every entry this routing may run, fallback first.
+  /// Every entry this routing may run, in route order, without repeats.
   public var entries: [String] {
-    [fallback] + Array(Set(byLanguage.values).subtracting([fallback])).sorted()
+    var seen: [String] = []
+    for id in routes.map(\.entry) + detectors where !seen.contains(id) { seen.append(id) }
+    return seen
   }
 }
 
 /// The preset table: the one place that maps presets to models. Remapping a preset is an edit
 /// here and nowhere else.
 public enum Presets {
-  /// The router entry that runs `extreme.routing`.
-  public static let extremeRouter = "extreme-routed"
+  static let ultra = "parakeet-ultra"
+  static let qwen3 = "qwen3-asr-1.7b-8bit"
+  static let speakers = "nemotron3-offline"
+
+  static let qwen3Note =
+    "this language needs Qwen3-ASR 1.7B instead of Parakeet Ultra: slower, and about 6 GB of RAM"
 
   public static let fast = Preset(
-    name: "fast", transcription: "parakeet-v3", speakers: "nemotron3-c128-split-w8a8",
-    summary: "Parakeet v3 + Nemotron-3 c128-split-w8a8, 25 languages",
-    ramGB: 0.4...0.4)
+    name: "fast", speakers: speakers,
+    summary: "Parakeet Ultra + Nemotron-3 offline, speakers by overlap",
+    ramGB: 0.4...0.4,
+    routing: LanguageRouting(
+      routes: [.init(ultra, .windows), .init(qwen3, .turnwise, note: qwen3Note)],
+      detectors: [ultra, qwen3]))
 
   public static let `default` = Preset(
-    name: "default", transcription: "parakeet-ultra", speakers: "nemotron3-offline",
-    summary: "Parakeet Ultra + Nemotron-3 offline, 25 languages",
-    ramGB: 0.4...0.4)
+    name: "default", speakers: speakers,
+    summary: "Parakeet Ultra + Nemotron-3 offline, decoded speaker turn by speaker turn",
+    ramGB: 0.4...0.4,
+    routing: LanguageRouting(
+      routes: [.init(ultra, .turnwise), .init(qwen3, .turnwise, note: qwen3Note)],
+      detectors: [ultra, qwen3]))
+
+  /// English and German go to Parakeet Ultra (best measured), other Qwen3-ASR languages to
+  /// Qwen3-ASR 1.7B 8-bit, the rest of Ultra's to Ultra.
+  static let accurateRouting = LanguageRouting(
+    routes: [
+      .init(ultra, .turnwise, only: ["de", "en"]), .init(qwen3, .turnwise),
+      .init(ultra, .turnwise),
+    ],
+    detectors: [qwen3])
 
   public static let accurate = Preset(
-    name: "accurate", transcription: "qwen3-asr-1.7b-8bit", speakers: "nemotron3-offline",
-    summary: "Qwen3-ASR 1.7B 8-bit + Qwen3 aligner + Nemotron-3 offline, 30 languages",
-    ramGB: 3.4...5.6)
+    name: "accurate", speakers: speakers,
+    summary: "Parakeet Ultra for en/de, Qwen3-ASR 1.7B 8-bit for other languages, turn by turn",
+    ramGB: 0.4...6.2, routing: accurateRouting)
 
-  /// Routing is a stub until the bake-off settles it: everything goes to the fallback.
   public static let extreme = Preset(
-    name: "extreme", transcription: extremeRouter, speakers: "nemotron3-offline",
-    summary: "Best measured model per language + Qwen3 aligner + Nemotron-3 offline",
-    ramGB: 5.5...5.7,
-    routing: LanguageRouting(byLanguage: [:], fallback: "qwen3-asr-1.7b-8bit"))
+    name: "extreme", speakers: speakers,
+    summary:
+      "Currently identical to accurate: no larger pipeline measured better with v0.1.0 engines",
+    ramGB: 0.4...6.2, routing: accurateRouting)
 
   public static let all: [Preset] = [fast, `default`, accurate, extreme]
 }

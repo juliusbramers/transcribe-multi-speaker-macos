@@ -269,7 +269,7 @@ enum CoreCases {
 
     t.test("flags: preset and language are checked against the catalogue") {
       let cat = Catalogue.shared
-      t.expect((try? cat.preset(named: "fast"))?.transcription, "parakeet-v3")
+      t.expect((try? cat.preset(named: "fast"))?.transcription, "parakeet-ultra")
       t.expect((try? cat.preset(named: "Default"))?.transcription, "parakeet-ultra")
       t.expect((try? cat.preset(named: "nope")) == nil, "unknown preset rejected")
       let parakeet = try cat.entry("parakeet-ultra")
@@ -463,7 +463,7 @@ enum CoreCases {
         t.expect(spk.kind, .speakers, name)
         t.expect(!asr.gated && !spk.gated, "\(name) needs no token")
       }
-      t.expect(try cat.preset(named: "fast").speakers, "nemotron3-c128-split-w8a8")
+      t.expect(try cat.preset(named: "fast").speakers, "nemotron3-offline")
       t.expect(try cat.preset(named: "default").speakers, "nemotron3-offline")
       t.expect(Set(cat.entries.map(\.id)).count, cat.entries.count, "unique ids")
     }

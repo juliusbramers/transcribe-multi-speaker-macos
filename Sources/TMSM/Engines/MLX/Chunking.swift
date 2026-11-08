@@ -60,7 +60,22 @@ public enum Chunking {
     return sum / Double(range.count)
   }
 
-  /// Below this mean square (about -70 dBFS) a window is treated as silence and not decoded:
-  /// speech models tend to invent text for pure silence.
+  /// Below this mean square (about -70 dBFS) a frame counts as silence.
   public static let silenceMeanSquare = 1e-7
+  /// Frame length for the silence test, in seconds.
+  public static let silenceFrameSeconds = 0.025
+
+  /// True only when every 25 ms frame of the range is below the silence level. Such windows are
+  /// not decoded (speech models tend to invent text for pure silence); a window with even one
+  /// short quiet reply is.
+  public static func isSilent(_ samples: [Float], _ range: Range<Int>) -> Bool {
+    let frame = max(1, Int(silenceFrameSeconds * Double(Audio.sampleRate)))
+    var start = range.lowerBound
+    while start < range.upperBound {
+      let end = min(start + frame, range.upperBound)
+      if meanSquare(samples, start..<end) >= silenceMeanSquare { return false }
+      start = end
+    }
+    return true
+  }
 }

@@ -10,6 +10,7 @@ enum MLXCases {
     windows(t)
     wordTimings(t)
     routing(t)
+    turnwise(t)
     if ProcessInfo.processInfo.environment["TMSM_SELFTEST_PREPARE"] == "1" { prepare(t) }
     if let clip = ProcessInfo.processInfo.environment["TMSM_SELFTEST_DETERMINISM"] {
       determinism(t, clip: clip)
@@ -19,15 +20,16 @@ enum MLXCases {
     }
   }
 
-  /// Opt-in measurement: `TMSM_SELFTEST_PROBE=<entry id>:<file>:<output folder>` runs a full
-  /// pipeline with that transcription entry and Nemotron-3 offline, for entries no preset uses.
+  /// Opt-in measurement: `TMSM_SELFTEST_PROBE=<entry id>:<file>:<output folder>[:turnwise]`
+  /// runs a full pipeline with that transcription entry and Nemotron-3 offline, for entries and
+  /// strategies no preset uses yet.
   static func probe(_ t: Runner, _ spec: String) {
-    let parts = spec.split(separator: ":", maxSplits: 2).map(String.init)
-    guard parts.count == 3 else { return t.test("probe") { t.expect(false, "bad probe spec") } }
+    let parts = spec.split(separator: ":", maxSplits: 3).map(String.init)
+    guard parts.count >= 3 else { return t.test("probe") { t.expect(false, "bad probe spec") } }
     let home = TMSMHome.resolve()
     let preset = Preset(
       name: "probe", transcription: parts[0], speakers: "nemotron3-offline", summary: "",
-      ramGB: nil)
+      ramGB: nil, strategy: parts.count > 3 && parts[3] == "turnwise" ? .turnwise : .windows)
     let catalogue = Catalogue(Catalogue.registrations, presets: [preset])
     let done = DispatchSemaphore(value: 0)
     let outcome = Mutex<Result<RunResult, any Error>?>(nil)
@@ -94,7 +96,7 @@ enum MLXCases {
       do {
         try home.activate()
         for p in Catalogue.shared.presets {
-          for id in [p.transcription, p.speakers] {
+          for id in p.entries {
             try await Catalogue.shared.entry(id).prepare(home, .silent)
           }
         }
@@ -104,9 +106,11 @@ enum MLXCases {
     done.wait()
     t.test("prepare: every preset's models download without running") {
       t.expect(failure.withLock { $0 } == nil, "prepare failed: \(failure.withLock { $0 } ?? "")")
-      for spec in MLXEngine.transcribers {
-        t.expect(MLXEngine.isDownloaded(spec.model, home), "\(spec.id) on disk")
+      let used = Set(Catalogue.shared.presets.flatMap(\.entries))
+      for spec in MLXEngine.transcribers where used.contains(spec.id) {
+        t.expect(MLXEngine.isDownloaded(spec.model, home), "\(spec.id) complete and pinned")
       }
+      t.expect(MLXEngine.isDownloaded(MLXEngine.aligner, home), "aligner complete and pinned")
     }
   }
 
@@ -122,26 +126,55 @@ enum MLXCases {
         t.expect(!asr.gated && !spk.gated, "\(p.name) needs no token")
         for id in p.routing?.entries ?? [] {
           t.expect(try cat.entry(id).kind, .transcription, "\(p.name) routes to \(id)")
-          t.expect(id != Presets.extremeRouter, "a route never points at the router")
+          t.expect(!(try cat.entry(id).gated), "\(id) needs no token")
         }
       }
     }
 
-    t.test("presets: accurate is Qwen3-ASR 1.7B 8-bit with Nemotron-3 offline") {
-      let p = try Catalogue.shared.preset(named: "accurate")
-      t.expect(p.transcription, "qwen3-asr-1.7b-8bit")
-      t.expect(p.speakers, "nemotron3-offline")
+    t.test("presets: the v0.1.0 mapping") {
+      let cat = Catalogue.shared
+      func pick(_ preset: String, _ language: String) throws -> String {
+        let (route, entry) = try PresetRouting.route(
+          cat.preset(named: preset), language: language, catalogue: cat)
+        return "\(entry.id)/\(route?.strategy.rawValue ?? "-")"
+      }
+      t.expect(try pick("fast", "de"), "parakeet-ultra/windows")
+      t.expect(try pick("fast", "ja"), "qwen3-asr-1.7b-8bit/turnwise")
+      t.expect(try pick("default", "en"), "parakeet-ultra/turnwise")
+      t.expect(try pick("default", "zh"), "qwen3-asr-1.7b-8bit/turnwise")
+      for preset in ["accurate", "extreme"] {
+        t.expect(try pick(preset, "en"), "parakeet-ultra/turnwise", preset)
+        t.expect(try pick(preset, "de"), "parakeet-ultra/turnwise", preset)
+        t.expect(try pick(preset, "fr"), "qwen3-asr-1.7b-8bit/turnwise", "\(preset) fr → Qwen3")
+        t.expect(try pick(preset, "hr"), "parakeet-ultra/turnwise", "\(preset) hr → Ultra only")
+      }
+      t.expect(cat.presets.allSatisfy { $0.speakers == "nemotron3-offline" }, "Nemotron offline")
       t.expect(
-        Catalogue.shared.presets.allSatisfy { $0.ramGB.map { $0.lowerBound > 0 } ?? true },
-        "RAM > 0")
+        cat.presets.allSatisfy { $0.ramGB.map { $0.lowerBound > 0 } ?? true }, "RAM > 0")
     }
 
-    t.test("presets: extreme routes, and covers German and English") {
-      let p = try Catalogue.shared.preset(named: "extreme")
-      t.expect(p.transcription, Presets.extremeRouter)
-      t.expect(p.routing != nil, "extreme has a routing table")
-      let router = try Catalogue.shared.entry(Presets.extremeRouter)
-      t.expect(router.languages.contains("de") && router.languages.contains("en"), "de and en")
+    t.test("presets: a language no route supports is an error naming --language") {
+      do {
+        _ = try PresetRouting.route(
+          Catalogue.shared.preset(named: "accurate"), language: "sw", catalogue: .shared)
+        t.expect(false, "expected an error")
+      } catch {
+        let message = error.localizedDescription
+        t.expect(message.contains("--language"), "names --language: \(message)")
+        t.expect(message.contains("de") && message.contains("ja"), "lists the languages")
+      }
+    }
+
+    t.test("presets: entries lists everything setup must download") {
+      let p = try Catalogue.shared.preset(named: "default")
+      t.expect(p.entries, ["parakeet-ultra", "qwen3-asr-1.7b-8bit", "nemotron3-offline"])
+    }
+
+    t.test("presets: extreme says it is accurate for now") {
+      let e = try Catalogue.shared.preset(named: "extreme")
+      let a = try Catalogue.shared.preset(named: "accurate")
+      t.expect(e.routing, a.routing)
+      t.expect(e.summary.hasPrefix("Currently identical to accurate"), "honest summary")
     }
 
     t.test("mlx: models live under models/mlx/<org>/<name>") {
@@ -185,25 +218,34 @@ enum MLXCases {
     }
   }
 
+  /// Aligned words → tmsm words, through the same two steps the engine uses.
+  static func place(
+    _ aligned: [(String, Double, Double)], _ text: String, offset: Double = 0,
+    length: Double
+  ) -> [Word] {
+    WordTiming.words(
+      WordTiming.locate(aligned, in: text, from: text.startIndex), text: text, offset: offset,
+      length: length)
+  }
+
   static func wordTimings(_ t: Runner) {
     t.test("words: shifted to file time, clamped into the window, never backwards") {
-      let words = WordTiming.place(
-        [("Hallo", 0.5, 1.0), (" ", 1.0, 1.1), ("Welt.", 0.8, 30.0)], text: "Hallo Welt.",
+      let words = place(
+        [("Hallo", 0.5, 1.0), (" ", 1.0, 1.1), ("Welt.", 0.8, 30.0)], "Hallo Welt.",
         offset: 100, length: 25)
       t.expect(words, [Word("Hallo", 100.5, 101.0), Word("Welt.", 100.8, 125.0)])
     }
 
     t.test("words: a partial alignment keeps the missing tail, timed after the last aligned word") {
-      let words = WordTiming.place(
-        [("Eins", 1, 2), ("zwei", 2, 3)], text: "Eins zwei drei vier", offset: 0, length: 7)
+      let words = place([("Eins", 1, 2), ("zwei", 2, 3)], "Eins zwei drei vier", length: 7)
       t.expect(words.map(\.text), ["Eins", "zwei", "drei", "vier"])
       t.expect(words[2].start, 3)
       t.expect(words[3].end, 7)
     }
 
-    t.test("words: a word the aligner skipped keeps its place between its neighbours") {
-      let words = WordTiming.place(
-        [("one", 0, 1), ("three", 3, 4)], text: "one two three — four", offset: 10, length: 6)
+    t.test("words: a word the aligner skipped keeps its place; folded punctuation stays") {
+      let words = place(
+        [("one", 0, 1), ("three—", 3, 4)], "one two three — four", offset: 10, length: 6)
       t.expect(words.map(\.text), ["one", "two", "three —", "four"])
       t.expect(words[1].start, 11)
       t.expect(words[1].end, 13)
@@ -211,35 +253,149 @@ enum MLXCases {
       t.expect(words[3].end, 16)
     }
 
-    t.test("words: unspaced scripts keep the aligner's split and any unreached tail") {
-      let words = WordTiming.place(
-        [("今日", 0, 1), ("は", 1, 2), ("晴れ", 2, 3)], text: "今日は晴れです", offset: 0, length: 5)
-      t.expect(words.map(\.text), ["今日", "は", "晴れ", "です"])
-      t.expect(words.last?.end, 5)
+    t.test("words: an aligned word repeated by the aligner is not duplicated") {
+      let words = place(
+        [("one—", 0, 1), ("five", 1, 2), ("five", 2, 3), ("six", 3, 4)], "one — five six",
+        length: 5)
+      t.expect(words.map(\.text), ["one —", "five", "six"])
     }
 
-    t.test("windows: very short windows are padded to the model minimum") {
-      let samples = [Float](repeating: 0.5, count: 100)
-      t.expect(WindowPadding.padded(samples[0..<100]).count, Audio.sampleRate / 2)
-      t.expect(WindowPadding.padded(samples[0..<100]).prefix(100).allSatisfy { $0 == 0.5 }, "kept")
-      let long = [Float](repeating: 0, count: Audio.sampleRate)
-      t.expect(WindowPadding.padded(long[0..<long.count]).count, Audio.sampleRate)
+    t.test("words: punctuation plus saturation recovers without duplicating words") {
+      // First pass: "five" onward is stuck at 4.0 s (saturated); the retry gets exactly the
+      // original text after the last reliable word and the audio after its end.
+      let text = "one — two three four five six seven eight nine"
+      var calls: [(String, Int)] = []
+      let spans = WordTiming.alignWithRecovery(text: text, length: 16_000 * 12) { sub, from in
+        calls.append((String(sub), from))
+        if from == 0 {
+          return [
+            ("one—", 0, 0.5), ("two", 0.5, 1), ("three", 1, 1.5), ("four", 1.5, 2),
+            ("five", 4, 4), ("six", 4, 4), ("seven", 4.02, 4.02), ("eight", 4.05, 4.05),
+            ("nine", 4.05, 4.05),
+          ]
+        }
+        return [("five", 0, 1), ("six", 1, 2), ("seven", 2, 3), ("eight", 3, 4), ("nine", 4, 5)]
+      }
+      let words = WordTiming.words(spans, text: text, offset: 0, length: 12)
+      t.expect(
+        words.map(\.text),
+        ["one —", "two", "three", "four", "five", "six", "seven", "eight", "nine"])
+      t.expect(calls.count, 2)
+      t.expect(calls.last?.0.trimmingCharacters(in: .whitespaces), "five six seven eight nine")
+      t.expect(calls.last?.1, 32_000, "retry starts at the end of 'four'")
+      t.expect(words[4].start, 2, "retry times are shifted to the window")
+    }
+
+    t.test("words: unspaced text keeps a leading quote and an interior omission in place") {
+      let words = place(
+        [("今日", 0, 1), ("晴れ", 2, 3), ("です」", 3, 4)], "「今日は晴れです」", length: 5)
+      t.expect(words.map(\.text).joined(), "「今日は晴れです」", "nothing lost or doubled")
+      t.expect(words.map(\.text), ["「", "今日", "は", "晴れ", "です」"])
+      t.expect(words[2].start, 1, "は sits between 今日 and 晴れ")
+      t.expect(words[2].end, 2)
     }
 
     t.test("words: no alignment spreads the text over the window, losing no word") {
-      let words = WordTiming.place([], text: "one two  three four", offset: 10, length: 4)
+      let words = place([], "one two  three four", offset: 10, length: 4)
       t.expect(words.map(\.text), ["one", "two", "three", "four"])
       t.expect(words.first?.start, 10)
       t.expect(words.last?.end, 14)
     }
+
+    t.test("silence: a window is skipped only if every 25 ms frame is silent") {
+      var samples = [Float](repeating: 0, count: 25 * Audio.sampleRate)
+      t.expect(Chunking.isSilent(samples, 0..<samples.count), "digital silence")
+      // A half-second quiet reply (RMS 0.002) in 25 s of silence.
+      for i in (10 * Audio.sampleRate)..<(10 * Audio.sampleRate + Audio.sampleRate / 2) {
+        samples[i] = i % 2 == 0 ? 0.002 : -0.002
+      }
+      t.expect(
+        Chunking.meanSquare(samples, 0..<samples.count) < Chunking.silenceMeanSquare,
+        "whole-window average is below the threshold")
+      t.expect(!Chunking.isSilent(samples, 0..<samples.count), "the quiet reply survives")
+    }
+
+    t.test("language: detection is constrained and unsure text gives nil") {
+      t.expect(
+        LanguageDetection.detect(
+          "Das ist ein ganz normaler deutscher Satz über das Wetter und die Arbeit.",
+          among: MLXEngine.qwen3Languages)?.code, "de")
+      t.expect(LanguageDetection.detect("", among: MLXEngine.qwen3Languages) == nil, "empty")
+      t.expect(
+        LanguageDetection.detect("Bonjour, ça va très bien merci.", among: ["de", "en"]) == nil
+          || LanguageDetection.detect("Bonjour, ça va très bien merci.", among: ["de", "en"])?
+            .code != "fr",
+        "never outside the candidates")
+    }
+  }
+
+  /// A stand-in speech engine: one word per segment that runs past the segment's end.
+  struct OverlongWord: TranscriptionEngine {
+    func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress) async throws
+      -> [Word]
+    {
+      [Word("w", 0.2, audio.duration + 3)]
+    }
+  }
+
+  static func turnwise(_ t: Runner) {
+    let sr = Audio.sampleRate
+    let flat: (Range<Int>) -> Double = { _ in 1 }
+
+    t.test("turns: no speaker segments give one speaker over the whole file, in ≤25 s pieces") {
+      let pieces = TurnwiseDecoding.plan(
+        segments: [], sampleCount: 60 * sr, maxSpeakers: 4, energy: flat)
+      t.expect(pieces.first?.range.lowerBound, 0)
+      t.expect(pieces.last?.range.upperBound, 60 * sr)
+      t.expect(pieces.allSatisfy { $0.speaker == 0 && $0.range.count <= 25 * sr }, "≤25 s")
+    }
+
+    t.test("turns: overlap goes to the newcomer, gaps split in the middle, nothing dropped") {
+      let segs = [
+        SpeakerSegment(0, 0, 5), SpeakerSegment(1, 4, 8), SpeakerSegment(0, 10, 12),
+        SpeakerSegment(0, 13, 14),
+      ]
+      let pieces = TurnwiseDecoding.plan(
+        segments: segs, sampleCount: 15 * sr, maxSpeakers: 4, energy: flat)
+      t.expect(pieces.map(\.speaker), [0, 1, 0])
+      t.expect(pieces[0].range, 0..<(4 * sr), "speaker 1 takes over at 4 s")
+      t.expect(pieces[1].range, (4 * sr)..<(9 * sr), "the 8–10 s gap splits at 9 s")
+      t.expect(pieces[2].range, (9 * sr)..<(15 * sr), "same-speaker pause and tail stay in")
+    }
+
+    t.test("turns: words take their turn's speaker, clamped to the real turn length") {
+      let audio = Audio(samples: [Float](repeating: 0, count: 10 * sr))
+      let pieces = [
+        TurnwiseDecoding.Piece(speaker: 3, range: 0..<(sr / 2)),
+        TurnwiseDecoding.Piece(speaker: 1, range: (sr / 2)..<(10 * sr)),
+      ]
+      let done = DispatchSemaphore(value: 0)
+      let result = Mutex<(words: [Word], speakers: [Int])?>(nil)
+      Task {
+        let r = try? await TurnwiseDecoding.decode(
+          audio, pieces: pieces, engine: OverlongWord(), language: "de", progress: .silent)
+        result.withLock { $0 = r }
+        done.signal()
+      }
+      done.wait()
+      let r = result.withLock { $0 }
+      t.expect(r?.speakers ?? [], [3, 1])
+      t.expect(r?.words.first, Word("w", 0.2, 0.5), "padded 0.5 s turn clamps to 0.5 s")
+      t.expect(r?.words.last?.end, 10)
+    }
+
+    t.test("presets: every preset says how it combines speech and speakers") {
+      t.expect(
+        Catalogue.shared.presets.allSatisfy { [.windows, .turnwise].contains($0.strategy) }, "set")
+    }
   }
 
   static func routing(_ t: Runner) {
-    t.test("routing: listed languages go to their entry, the rest to the fallback") {
-      let r = LanguageRouting(byLanguage: ["de": "parakeet-ultra", "en": "a"], fallback: "a")
-      t.expect(r.entry(for: "de"), "parakeet-ultra")
-      t.expect(r.entry(for: "fr"), "a")
-      t.expect(r.entries, ["a", "parakeet-ultra"], "fallback first, no duplicates")
+    t.test("routing: entries in route order, detectors after, no repeats") {
+      let r = LanguageRouting(
+        routes: [.init("a", .turnwise, only: ["de"]), .init("b", .turnwise), .init("a", .windows)],
+        detectors: ["b", "c"])
+      t.expect(r.entries, ["a", "b", "c"])
     }
 
     t.test("routing: language names and detection from text") {
@@ -253,12 +409,14 @@ enum MLXCases {
           of: "This is an ordinary English sentence about the weather and work."), "en")
     }
 
-    t.test("routing: the detection prefix is the first minute, cut near a quiet point") {
-      let short = Audio(samples: [Float](repeating: 0.1, count: 30 * Audio.sampleRate))
-      t.expect(RoutedTranscriber.detectionPrefix(short).samples.count, short.samples.count)
-      let long = Audio(samples: [Float](repeating: 0.1, count: 120 * Audio.sampleRate))
-      let n = RoutedTranscriber.detectionPrefix(long).samples.count
-      t.expect(n > 55 * Audio.sampleRate && n <= 60 * Audio.sampleRate, "55–60 s, got \(n)")
+    t.test("routing: the detection sample takes up to three speech windows, skipping silence") {
+      let sr = Audio.sampleRate
+      var samples = [Float](repeating: 0, count: 120 * sr)
+      for i in (30 * sr)..<(120 * sr) { samples[i] = i % 2 == 0 ? 0.1 : -0.1 }
+      let sample = PresetRouting.speechSample(Audio(samples: samples))
+      t.expect(
+        sample.samples.filter { $0 == 0 }.count < 11 * sr, "the silent first window is left out")
+      t.expect(sample.samples.count >= 50 * sr && sample.samples.count <= 75 * sr, "≈ a minute")
     }
   }
 }

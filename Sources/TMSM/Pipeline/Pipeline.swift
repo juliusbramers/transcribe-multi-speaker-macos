@@ -58,24 +58,28 @@ public struct Pipeline: Sendable {
     )
     .standardizedFileURL
     let preset = try resolvePreset(options)
-    let asrEntry = try catalogue.entry(preset.transcription)
-    let language = options.languageCode
-    if let language, !asrEntry.languages.contains(language) {
-      throw TMSMError.unsupportedLanguage(language, asrEntry.name)
-    }
-    guard case .transcription(let makeASR) = asrEntry.factory else {
-      throw TMSMError.unknownModel(preset.transcription)
+    // An unsupported --language fails before any decoding.
+    if let language = options.languageCode {
+      _ = try PresetRouting.route(preset, language: language, catalogue: catalogue)
     }
 
     progress.activity("Decoding audio")
     let audio = try AudioDecoder.decode(input, environment: environment)
 
-    let words = try await makeASR(home).transcribe(audio, language: language, progress: progress)
+    // The language (given or detected once) picks the entry and strategy (see PresetRouting).
+    let choice = try await PresetRouting.resolve(
+      preset, language: options.languageCode, audio: audio, home: home, catalogue: catalogue,
+      progress: progress)
+    let asrEntry = choice.entry
+    let language = choice.language
+    guard case .transcription(let makeASR) = asrEntry.factory else {
+      throw TMSMError.unknownModel(asrEntry.id)
+    }
 
     let limit = options.speakers.limit
     var speakerEntry: CatalogueEntry?
     var track = SpeakerTrack(segments: [])
-    if limit > 1 && !words.isEmpty {
+    func labelSpeakers() async throws {
       let entry = try catalogue.entry(preset.speakers)
       guard case .speakers(let makeLabeller) = entry.factory else {
         throw TMSMError.unknownModel(preset.speakers)
@@ -84,11 +88,28 @@ public struct Pipeline: Sendable {
       track = try await makeLabeller(home).label(audio, maxSpeakers: limit, progress: progress)
     }
 
+    let words: [Word]
+    let speakers: [Int]
+    if choice.strategy == .turnwise && limit > 1 {
+      // Speakers first, then one decode per speaker turn (see TurnwiseDecoding).
+      try await labelSpeakers()
+      let pieces = TurnwiseDecoding.plan(
+        segments: track.segments, sampleCount: audio.samples.count, maxSpeakers: limit
+      ) { Chunking.meanSquare(audio.samples, $0) }
+      let decoded = try await TurnwiseDecoding.decode(
+        audio, pieces: pieces, engine: makeASR(home), language: language, progress: progress)
+      words = decoded.words
+      speakers = SpeakerAssignment.renumber(decoded.speakers)
+    } else {
+      words = try await makeASR(home).transcribe(audio, language: language, progress: progress)
+      if limit > 1 && !words.isEmpty { try await labelSpeakers() }
+      speakers = SpeakerAssignment.assign(
+        words: words, segments: track.segments, activity: track.activity, maxSpeakers: limit)
+    }
+
     if environment["TMSM_DEBUG"] == "1" {
       dumpDebug(input: input, preset: preset.name, words: words, track: track)
     }
-    let speakers = SpeakerAssignment.assign(
-      words: words, segments: track.segments, activity: track.activity, maxSpeakers: limit)
     let transcript = Transcript(title: input.lastPathComponent, words: words, speakers: speakers)
 
     progress.activity("Writing")

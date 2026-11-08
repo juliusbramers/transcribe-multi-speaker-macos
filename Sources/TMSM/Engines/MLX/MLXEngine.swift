@@ -1,4 +1,3 @@
-import AudioCommon
 import Darwin
 import Foundation
 
@@ -17,58 +16,20 @@ public enum MLXEngine {
   /// Voxtral Mini's 8 languages.
   public static let voxtralLanguages = ["de", "en", "es", "fr", "hi", "it", "nl", "pt"]
 
-  /// The forced aligner every MLX entry uses for word timings.
-  public static let aligner = MLXModel(
-    repo: "aufklarer/Qwen3-ForcedAligner-0.6B-8bit", name: "Qwen3 forced aligner 0.6B 8-bit",
-    files: qwen3Files + ["quantize_config.json"])
-
-  /// Files besides config.json and the weights that each loader reads.
-  static let qwen3Files = ["vocab.json", "merges.txt", "tokenizer_config.json"]
-  static let voxtralFiles = ["tekken.json", "preprocessor_config.json"]
-
   static let qwen3Bit8 = MLXTranscriberSpec(
-    id: "qwen3-asr-1.7b-8bit", kind: .qwen3,
-    model: MLXModel(
-      repo: "aufklarer/Qwen3-ASR-1.7B-MLX-8bit", name: "Qwen3-ASR 1.7B 8-bit", files: qwen3Files),
-    languages: qwen3Languages, downloadMB: 2354 + 1222, license: "Apache-2.0")
+    id: "qwen3-asr-1.7b-8bit", kind: .qwen3, model: qwen3Bit8Model, languages: qwen3Languages,
+    license: "Apache-2.0")
   static let qwen3Bit5 = MLXTranscriberSpec(
-    id: "qwen3-asr-1.7b-5bit", kind: .qwen3,
-    model: MLXModel(
-      repo: "aufklarer/Qwen3-ASR-1.7B-MLX-5bit", name: "Qwen3-ASR 1.7B 5-bit", files: qwen3Files),
-    languages: qwen3Languages, downloadMB: 2332 + 1222, license: "Apache-2.0")
+    id: "qwen3-asr-1.7b-5bit", kind: .qwen3, model: qwen3Bit5Model, languages: qwen3Languages,
+    license: "Apache-2.0")
   static let voxtralBit8 = MLXTranscriberSpec(
-    id: "voxtral-mini-3b-8bit", kind: .voxtral,
-    model: MLXModel(
-      repo: "aufklarer/Voxtral-Mini-3B-2507-MLX-8bit", name: "Voxtral Mini 3B 8-bit",
-      files: voxtralFiles),
-    languages: voxtralLanguages, downloadMB: 5581 + 1222, license: "Apache-2.0")
+    id: "voxtral-mini-3b-8bit", kind: .voxtral, model: voxtralBit8Model,
+    languages: voxtralLanguages, license: "Apache-2.0")
 
   static let transcribers = [qwen3Bit8, qwen3Bit5, voxtralBit8]
 
   public static let registration = EngineRegistration(
-    engine: folder, entries: transcribers.map(\.entry) + [router])
-
-  /// The entry behind a routed preset. Its choices per language come from the preset table.
-  static var router: CatalogueEntry {
-    let routing = Presets.extreme.routing ?? LanguageRouting(byLanguage: [:], fallback: "")
-    let candidates =
-      FluidAudioEngine.registration.entries + transcribers.map(\.entry)
-    let routed = candidates.filter { routing.entries.contains($0.id) }
-    return CatalogueEntry(
-      id: Presets.extremeRouter, name: "Best model per language", engine: folder,
-      languages: Array(Set(routed.flatMap(\.languages))).sorted(),
-      downloadMB: routed.map(\.downloadMB).reduce(0, +), license: "see routed models",
-      gated: false,
-      factory: .transcription { home in
-        RoutedTranscriber(routing: routing, home: home)
-      },
-      storage: { home in routed.flatMap { $0.storage(home) } },
-      prepare: { home, progress in
-        for id in routing.entries where id != Presets.extremeRouter {
-          try await Catalogue.shared.entry(id).prepare(home, progress)
-        }
-      })
-  }
+    engine: folder, entries: transcribers.map(\.entry))
 
   static func modelsRoot(_ home: TMSMHome) -> URL { home.models(engine: folder) }
 
@@ -87,18 +48,16 @@ public enum MLXEngine {
     setenv("QWEN3_CACHE_DIR", home.cache.appendingPathComponent("speech-swift").path, 1)
   }
 
-  /// Downloads a model's files without loading it. Files already on disk are skipped.
+  /// Makes the model's pinned bundle complete: no network when it already is, otherwise the
+  /// missing files from the pinned commit, hash-checked.
   static func download(_ model: MLXModel, _ home: TMSMHome, _ progress: Progress) async throws {
     redirectCaches(home)
-    let needed = !isDownloaded(model, home)
-    if needed {
-      progress.stage("Downloading \(model.name)")
-    } else {
-      progress.activity("Checking \(model.name)")
-    }
-    try await HuggingFaceDownloader.downloadWeights(
-      modelId: model.repo, to: directory(model, home), additionalFiles: model.files,
-      progressHandler: { fraction in if needed { progress.update(fraction) } })
+    guard !isDownloaded(model, home) else { return }
+    progress.stage("Downloading \(model.name)")
+    try await PinnedDownload.ensure(
+      repo: model.repo, revision: model.revision, files: model.files,
+      into: directory(model, home)
+    ) { done, total in progress.update(total > 0 ? Double(done) / Double(total) : 1) }
   }
 
   /// speech-swift prints loading notes to stdout, which belongs to tmsm's result (the path or
@@ -140,20 +99,23 @@ public enum MLXEngine {
     }
   }
 
-  /// True when the folder already holds the weights, so loading needs no download.
+  /// True when the complete pinned bundle is on disk, so loading needs no network.
   static func isDownloaded(_ model: MLXModel, _ home: TMSMHome) -> Bool {
-    let dir = directory(model, home)
-    let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-    return files.contains("config.json") && files.contains { $0.hasSuffix(".safetensors") }
+    PinnedDownload.isComplete(directory(model, home), revision: model.revision, files: model.files)
   }
 }
 
-/// One Hugging Face repo.
+/// One Hugging Face repo at one commit.
 public struct MLXModel: Sendable, Equatable {
   public var repo: String
   public var name: String
-  /// Files besides config.json and the weights.
-  public var files: [String]
+  /// The immutable commit every file comes from.
+  public var revision: String
+  /// Every file the loaders read, with its size and hash.
+  public var files: [PinnedFile]
+
+  /// Download size in MB.
+  public var megabytes: Int { Int(files.reduce(Int64(0)) { $0 + $1.size } / 1_000_000) }
 }
 
 /// A speech-to-text entry: which model, and how speech-swift runs it.
@@ -164,15 +126,13 @@ struct MLXTranscriberSpec: Sendable {
   var kind: Kind
   var model: MLXModel
   var languages: [String]
-  /// Model plus aligner, in MB.
-  var downloadMB: Int
   var license: String
 
   var entry: CatalogueEntry {
     let spec = self
     return CatalogueEntry(
       id: id, name: model.name, engine: MLXEngine.folder, languages: languages,
-      downloadMB: downloadMB, license: license, gated: false,
+      downloadMB: model.megabytes + MLXEngine.aligner.megabytes, license: license, gated: false,
       factory: .transcription { home in MLXTranscriber(spec: spec, home: home) },
       storage: { home in
         [MLXEngine.directory(spec.model, home), MLXEngine.directory(MLXEngine.aligner, home)]

@@ -7,87 +7,146 @@ import VoxtralASR
 /// Speech to text on MLX: windows → text (Qwen3-ASR or Voxtral) → word timings (Qwen3 aligner).
 ///
 /// The speech model and the aligner are loaded one after the other, never together, so a run's
-/// peak memory is the larger of the two, not their sum.
+/// peak memory is the larger of the two, not their sum. Each model loads once per run, however
+/// many segments (whole file or speaker turns) it is given.
 struct MLXTranscriber: TranscriptionEngine {
   let spec: MLXTranscriberSpec
   let home: TMSMHome
 
-  func transcribe(_ audio: Audio, language: String?, progress: Progress) async throws -> [Word] {
-    // speech-swift prints loading and alignment notes to stdout.
-    try await MLXEngine.quiet { try await run(audio, language: language, progress: progress) }
+  /// One window to decode: a range of samples in one input segment.
+  struct Piece {
+    var segment: Int
+    var range: Range<Int>
   }
 
-  private func run(_ audio: Audio, language: String?, progress: Progress) async throws -> [Word] {
-    let windows = Chunking.plan(audio.samples)
-    let texts = try await recognise(audio, windows: windows, language: language, progress: progress)
+  /// One file: words timed by the forced aligner.
+  func transcribe(_ audio: Audio, language: String?, progress: Progress) async throws -> [Word] {
+    // speech-swift prints loading and alignment notes to stdout.
+    try await MLXEngine.quiet {
+      try await run([audio], language: language, align: true, progress: progress)
+    }[0]
+  }
+
+  /// Speaker turns (or a language-detection sample): the words take their turn's speaker, so
+  /// exact word times are not needed and the aligner is not loaded; words are spread evenly over
+  /// their window.
+  func transcribe(segments: [Audio], language: String?, progress: Progress) async throws
+    -> [[Word]]
+  {
+    try await MLXEngine.quiet {
+      try await run(segments, language: language, align: false, progress: progress)
+    }
+  }
+
+  private func run(
+    _ segments: [Audio], language: String?, align alignWords: Bool, progress: Progress
+  ) async throws -> [[Word]] {
+    let pieces = segments.enumerated().flatMap { i, audio in
+      Chunking.plan(audio.samples).map { Piece(segment: i, range: $0) }
+    }
+    let (texts, used) = try await recognise(
+      segments, pieces: pieces, language: language, progress: progress)
     Memory.clearCache()  // the speech model is gone; return its buffers before the aligner loads
-    let alignLanguage = language ?? LanguageDetection.language(of: texts.joined(separator: " "))
+    guard alignWords else {
+      var words = [[Word]](repeating: [], count: segments.count)
+      for (piece, text) in zip(pieces, texts) where !text.isEmpty {
+        words[piece.segment] += WordTiming.words(
+          [], text: text, offset: Double(piece.range.lowerBound) / Double(Audio.sampleRate),
+          length: Double(piece.range.count) / Double(Audio.sampleRate))
+      }
+      return words
+    }
     let words = try await align(
-      audio, windows: windows, texts: texts, language: alignLanguage, progress: progress)
+      segments, pieces: pieces, texts: texts, language: used, progress: progress)
     Memory.clearCache()
     return words
   }
 
-  /// Text per window ("" for silent windows). Loads the speech model, decodes, releases it.
+  /// Text per piece ("" for silent ones), and the language it was decoded in. Loads the speech
+  /// model once, decodes, releases it.
   func recognise(
-    _ audio: Audio, windows: [Range<Int>], language: String?, progress: Progress
-  ) async throws -> [String] {
+    _ segments: [Audio], pieces: [Piece], language: String?, progress: Progress
+  ) async throws -> ([String], String?) {
     MLXEngine.redirectCaches(home)
-    let decode = try await load(language: language, progress: progress)
+    let model = try await load(progress: progress)
+    let speech = pieces.map { !Chunking.isSilent(segments[$0.segment].samples, $0.range) }
+    func samples(_ piece: Piece) -> [Float] {
+      WindowPadding.padded(segments[piece.segment].samples[piece.range])
+    }
+
+    // Qwen3 left to detect the language itself emits the wrong script on some turns, so the
+    // language is fixed once per file and passed to every window.
+    var used = language
+    if used == nil {
+      progress.activity("Detecting the language")
+      var text = ""
+      var seconds = 0.0
+      for (piece, isSpeech) in zip(pieces, speech) where isSpeech {
+        text += " " + (try model(samples(piece), nil))
+        seconds += Double(piece.range.count) / Double(Audio.sampleRate)
+        if seconds >= LanguageDetection.sampleSeconds { break }
+        if text.split(whereSeparator: \.isWhitespace).count >= 400 { break }
+      }
+      let detected = LanguageDetection.detect(text, among: spec.languages)
+      used = detected?.code ?? LanguageDetection.fallback
+      if detected == nil, !text.trimmingCharacters(in: .whitespaces).isEmpty {
+        LanguageDetection.warn(
+          "language unclear, transcribing as \(LanguageDetection.fallback);"
+            + " pass --language to set it", progress: progress)
+      }
+    }
 
     progress.stage("Transcribing")
     var texts: [String] = []
-    for (i, window) in windows.enumerated() {
+    for (i, piece) in pieces.enumerated() {
       try Task.checkCancellation()
-      let samples = WindowPadding.padded(audio.samples[window])
-      if Chunking.meanSquare(audio.samples, window) < Chunking.silenceMeanSquare {
-        texts.append("")
-      } else {
-        texts.append(try decode(samples).trimmingCharacters(in: .whitespacesAndNewlines))
-      }
-      progress.update(Double(i + 1) / Double(windows.count))
+      texts.append(
+        speech[i]
+          ? try model(samples(piece), used).trimmingCharacters(in: .whitespacesAndNewlines) : "")
+      progress.update(Double(i + 1) / Double(max(1, pieces.count)))
       await Task.yield()
     }
-    return texts
+    return (texts, used)
   }
 
-  /// Loads the speech model and returns a window decoder that holds the only reference to it,
-  /// so the model is freed when the caller drops the closure.
-  private func load(
-    language: String?, progress: Progress
-  ) async throws -> ([Float]) throws -> String {
+  /// Loads the speech model and returns a decoder (samples, language) that holds the only
+  /// reference to it, so the model is freed when the caller drops the closure. Decoding is
+  /// greedy: the same audio always gives the same text.
+  private func load(progress: Progress) async throws -> ([Float], String?) throws -> String {
     switch spec.kind {
     case .qwen3:
-      // Offline: `MLXEngine.load` has just downloaded everything.
       let model = try await MLXEngine.load(spec.model, home, progress) { dir in
         try await Qwen3ASRModel.fromPretrained(
           modelId: spec.model.repo, cacheDir: dir, offlineMode: true)
       }
-      // Greedy: the same audio always gives the same text.
-      let options = Qwen3DecodingOptions(
-        language: language.flatMap(LanguageDetection.name), temperature: 0)
-      return { samples in
-        try model.transcribeThrowing(audio: samples, sampleRate: Audio.sampleRate, options: options)
+      return { samples, language in
+        let options = Qwen3DecodingOptions(
+          language: language.flatMap(LanguageDetection.name), temperature: 0)
+        return try model.transcribeThrowing(
+          audio: samples, sampleRate: Audio.sampleRate, options: options)
       }
     case .voxtral:
       let model = try await MLXEngine.load(spec.model, home, progress) { dir in
         try await VoxtralModel.fromPretrained(spec.model.repo, cacheDir: dir, offlineMode: true)
       }
-      // Greedy (Voxtral only decodes by argmax). Its default of 128 tokens can cut off a
-      // fast-spoken 25 s window.
-      let options = VoxtralDecodingOptions(maxTokens: 448, language: language)
-      return { samples in
-        model.transcribe(audio: samples, sampleRate: Audio.sampleRate, options: options)
+      // Voxtral only decodes by argmax. Its default of 128 tokens can cut off a fast-spoken
+      // 25 s window.
+      return { samples, language in
+        model.transcribe(
+          audio: samples, sampleRate: Audio.sampleRate,
+          options: VoxtralDecodingOptions(maxTokens: 448, language: language))
       }
     }
   }
 
-  /// Word timings for each window's text. Loads the aligner, aligns, releases it.
+  /// Word timings for each piece's text, grouped by segment. Loads the aligner, aligns,
+  /// releases it.
   func align(
-    _ audio: Audio, windows: [Range<Int>], texts: [String], language: String?,
+    _ segments: [Audio], pieces: [Piece], texts: [String], language: String?,
     progress: Progress
-  ) async throws -> [Word] {
-    guard texts.contains(where: { !$0.isEmpty }) else { return [] }
+  ) async throws -> [[Word]] {
+    var result = [[Word]](repeating: [], count: segments.count)
+    guard texts.contains(where: { !$0.isEmpty }) else { return result }
     MLXEngine.redirectCaches(home)
     let model = MLXEngine.aligner
     let aligner = try await MLXEngine.load(model, home, progress) { dir in
@@ -98,118 +157,175 @@ struct MLXTranscriber: TranscriptionEngine {
     // The aligner splits words by language only for scripts without spaces.
     let languageName = language.flatMap(LanguageDetection.name) ?? "English"
     progress.stage("Aligning words")
-    var words: [Word] = []
-    for (i, (window, text)) in zip(windows, texts).enumerated() where !text.isEmpty {
+    for (i, (piece, text)) in zip(pieces, texts).enumerated() where !text.isEmpty {
       try Task.checkCancellation()
-      let offset = Double(window.lowerBound) / Double(Audio.sampleRate)
-      let length = Double(window.count) / Double(Audio.sampleRate)
-      let aligned = aligner.alignLong(
-        audio: WindowPadding.padded(audio.samples[window]), text: text,
-        sampleRate: Audio.sampleRate,
-        language: languageName)
-      words += WordTiming.place(
-        aligned.map { ($0.text, Double($0.startTime), Double($0.endTime)) },
-        text: text, offset: offset, length: length)
-      progress.update(Double(i + 1) / Double(windows.count))
+      let samples = segments[piece.segment].samples[piece.range]
+      let spans = WordTiming.alignWithRecovery(text: text, length: samples.count) {
+        sub, from in
+        let audio = WindowPadding.padded(samples.dropFirst(from))
+        return aligner.align(
+          audio: audio, text: String(sub), sampleRate: Audio.sampleRate, language: languageName
+        ).map { ($0.text, Double($0.startTime), Double($0.endTime)) }
+      }
+      let offset = Double(piece.range.lowerBound) / Double(Audio.sampleRate)
+      let length = Double(piece.range.count) / Double(Audio.sampleRate)
+      result[piece.segment] += WordTiming.words(spans, text: text, offset: offset, length: length)
+      progress.update(Double(i + 1) / Double(max(1, pieces.count)))
       await Task.yield()
     }
     progress.update(1)
-    return words
+    return result
   }
 }
 
 /// Turns aligner output into tmsm words.
+///
+/// Each aligned word is located in the recognised text, in order, so every word keeps its
+/// original spelling and place: repeats the aligner produces cannot duplicate text, and text it
+/// skips stays where it was, with times spread over the gap between its aligned neighbours.
 enum WordTiming {
-  /// The recognised text's words, with the aligner's times where it gave them, shifted to file
-  /// time and clamped into the window.
-  ///
-  /// The aligner can return fewer words than the text holds (it stops when its timings
-  /// saturate, or returns nothing). Words it missed keep their place and get times spread over
-  /// the gap between their aligned neighbours, so no transcribed word is lost.
-  static func place(
-    _ aligned: [(text: String, start: Double, end: Double)], text: String, offset: Double,
-    length: Double
-  ) -> [Word] {
-    let tokens = joinPunctuation(text.split(whereSeparator: \.isWhitespace).map(String.init))
-    guard !tokens.isEmpty else { return [] }
-    var timed: [(text: String, start: Double, end: Double)] = []
-    var last = 0.0
-    for word in aligned {
-      let trimmed = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !trimmed.isEmpty else { continue }
-      let start = min(max(word.start, last), length)
-      timed.append((trimmed, start, min(max(word.end, start), length)))
-      last = start
-    }
-    // More aligned words than spaces: a script without spaces, which the aligner splits itself.
-    if timed.count > tokens.count {
-      return unspaced(timed, text: text, offset: offset, length: length)
-    }
+  /// An aligned stretch of the text, with times in seconds from the window's start.
+  struct Span {
+    var range: Range<String.Index>
+    var start: Double
+    var end: Double
+  }
 
-    // Match text words to aligned words in order; the aligner may skip one now and then.
-    var times = [(start: Double, end: Double)?](repeating: nil, count: tokens.count)
-    var j = 0
-    for (i, token) in tokens.enumerated() where j < timed.count {
-      let key = normalise(token)
-      if let k = (j..<min(j + 3, timed.count)).first(where: { normalise(timed[$0].text) == key }) {
-        times[i] = (timed[k].start, timed[k].end)
-        j = k + 1
+  /// How far ahead (in characters) an aligned word is looked for before it counts as unmatched.
+  static let lookahead = 48
+  /// Saturation: at least this many consecutive words stuck at one time…
+  static let plateauWords = 5
+  /// …within this many seconds of each other.
+  static let plateauTolerance = 0.1
+
+  /// Aligns `text` with bounded recovery: when the aligner's times saturate (a run of words
+  /// stuck at one time), the reliable prefix is kept and the rest of the original text is
+  /// aligned again on the rest of the audio, with the same text boundaries. `align` gets the
+  /// remaining text and the sample offset to start from, and returns words with times relative
+  /// to that offset.
+  static func alignWithRecovery(
+    text: String, length: Int, maxPasses: Int = 4,
+    minimumSamples: Int = Audio.sampleRate,
+    align: (Substring, Int) -> [(String, Double, Double)]
+  ) -> [Span] {
+    var spans: [Span] = []
+    var textStart = text.startIndex
+    var sampleStart = 0
+    for _ in 0..<maxPasses {
+      let rest = text[textStart...]
+      guard !rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { break }
+      let shift = Double(sampleStart) / Double(Audio.sampleRate)
+      let aligned = align(rest, sampleStart).map { ($0.0, $0.1 + shift, $0.2 + shift) }
+      let found = locate(aligned, in: text, from: textStart)
+      guard let stuck = plateau(found) else {
+        spans += found
+        break
+      }
+      let reliable = found.prefix(stuck)
+      spans += reliable
+      guard let last = reliable.last else { break }
+      let next = Int(last.end * Double(Audio.sampleRate))
+      guard length - next >= minimumSamples, next > sampleStart else { break }
+      textStart = last.range.upperBound
+      sampleStart = next
+    }
+    return spans
+  }
+
+  /// Finds each aligned word in `text` from `from` on, in order, ignoring whitespace (the
+  /// aligner folds lone punctuation into the word before it). A word not found within
+  /// `lookahead` characters is dropped; the cursor never moves back.
+  static func locate(
+    _ aligned: [(String, Double, Double)], in text: String, from: String.Index
+  ) -> [Span] {
+    var spans: [Span] = []
+    var cursor = from
+    for (surface, start, end) in aligned {
+      let wanted = Array(surface.filter { !$0.isWhitespace })
+      guard !wanted.isEmpty else { continue }
+      var candidate = cursor
+      var tried = 0
+      while candidate < text.endIndex, tried < lookahead {
+        if !text[candidate].isWhitespace, let matchEnd = match(wanted, in: text, at: candidate) {
+          spans.append(Span(range: candidate..<matchEnd, start: start, end: end))
+          cursor = matchEnd
+          break
+        }
+        candidate = text.index(after: candidate)
+        tried += 1
       }
     }
-    // Spread unmatched runs over the gap between their neighbours.
+    return spans
+  }
+
+  /// End of `wanted` matched at `start`, skipping whitespace in the text.
+  private static func match(_ wanted: [Character], in text: String, at start: String.Index)
+    -> String.Index?
+  {
+    var i = start
+    var k = 0
+    while k < wanted.count {
+      guard i < text.endIndex else { return nil }
+      if text[i].isWhitespace {
+        i = text.index(after: i)
+        continue
+      }
+      guard text[i] == wanted[k] else { return nil }
+      i = text.index(after: i)
+      k += 1
+    }
+    return i
+  }
+
+  /// Index of the first span of a saturated run, or nil when the times look healthy.
+  static func plateau(_ spans: [Span]) -> Int? {
+    guard spans.count >= plateauWords else { return nil }
+    var runStart = 0
+    for i in 1..<spans.count {
+      if abs(spans[i].start - spans[runStart].start) > plateauTolerance { runStart = i }
+      if i - runStart + 1 >= plateauWords { return runStart }
+    }
+    return nil
+  }
+
+  /// The text's words in order: aligned spans with their times, unaligned stretches split at
+  /// whitespace with times spread over the gap between their neighbours. Times are clamped into
+  /// `0...length`, never run backwards, and are shifted by `offset`.
+  static func words(_ spans: [Span], text: String, offset: Double, length: Double) -> [Word] {
+    var items: [(text: String, time: (Double, Double)?)] = []
+    func addUnaligned(_ part: Substring) {
+      for token in part.split(whereSeparator: \.isWhitespace) {
+        items.append((String(token), nil))
+      }
+    }
+    var cursor = text.startIndex
+    var last = 0.0
+    for span in spans {
+      addUnaligned(text[cursor..<span.range.lowerBound])
+      let start = min(max(span.start, last), length)
+      let end = min(max(span.end, start), length)
+      items.append((String(text[span.range]), (start, end)))
+      last = start
+      cursor = span.range.upperBound
+    }
+    addUnaligned(text[cursor...])
+
+    var times = items.map(\.time)
     var i = 0
-    while i < tokens.count {
+    while i < times.count {
       guard times[i] == nil else {
         i += 1
         continue
       }
       var k = i
-      while k < tokens.count, times[k] == nil { k += 1 }
-      let from = i > 0 ? times[i - 1]!.end : 0
-      let to = max(from, k < tokens.count ? times[k]!.start : length)
+      while k < times.count, times[k] == nil { k += 1 }
+      let from = i > 0 ? times[i - 1]!.1 : 0
+      let to = max(from, k < times.count ? times[k]!.0 : length)
       let step = (to - from) / Double(k - i)
-      for n in i..<k {
-        times[n] = (from + Double(n - i) * step, from + Double(n - i + 1) * step)
-      }
+      for n in i..<k { times[n] = (from + Double(n - i) * step, from + Double(n - i + 1) * step) }
       i = k
     }
-    return zip(tokens, times).map { Word($0, offset + $1!.start, offset + $1!.end) }
-  }
-
-  /// Unspaced scripts: the aligner's words, plus any tail of the text it did not reach as one
-  /// word at the end of the window.
-  private static func unspaced(
-    _ timed: [(text: String, start: Double, end: Double)], text: String, offset: Double,
-    length: Double
-  ) -> [Word] {
-    var words = timed.map { Word($0.text, offset + $0.start, offset + $0.end) }
-    let covered = timed.map(\.text).joined().filter { !$0.isWhitespace }.count
-    let all = text.filter { !$0.isWhitespace }
-    if covered < all.count {
-      let start = timed.last?.end ?? 0
-      words.append(Word(String(all.dropFirst(covered)), offset + start, offset + length))
-    }
-    return words
-  }
-
-  /// Punctuation-only tokens ("—", "…") join the word before them, as the aligner does.
-  static func joinPunctuation(_ tokens: [String]) -> [String] {
-    var result: [String] = []
-    for token in tokens {
-      if normalise(token).isEmpty, !result.isEmpty {
-        result[result.count - 1] += " " + token
-      } else {
-        result.append(token)
-      }
-    }
-    return result
-  }
-
-  /// Letters and digits only, lowercased: how the aligner's words and the text's are compared.
-  static func normalise(_ word: String) -> String {
-    String(
-      word.lowercased().unicodeScalars.filter(CharacterSet.alphanumerics.contains).map(
-        Character.init))
+    return zip(items, times).map { Word($0.text, offset + $1!.0, offset + $1!.1) }
   }
 }
 

@@ -28,6 +28,21 @@ public enum FluidAudioEngine {
 
   static func modelsRoot(_ home: TMSMHome) -> URL { home.models(engine: folder) }
 
+  /// Every model repo pinned to one immutable commit, so every installation runs the same
+  /// files. FluidAudio downloads from that commit and marks the folder with it; a folder whose
+  /// mark matches and whose files are complete is used without the network. (FluidAudio checks
+  /// sizes and Core ML bundle completeness, not hashes.)
+  static let revisions: [String: String] = [
+    Repo.parakeetV3.remotePath: "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe",
+    Repo.parakeetUltra.remotePath: "95eaa59a39d4394f047a4dc5cce480388a60d1b6",
+    Repo.nemotron3Diarization.remotePath: "25a90f97f254428d4b30374b76af9c74fdee8327",
+  ]
+
+  /// Applies `revisions` to FluidAudio's registry. Call before any FluidAudio download.
+  static func pinRevisions() {
+    ModelRegistry.revisionOverrides.merge(revisions) { _, pinned in pinned }
+  }
+
   static func parakeet(
     id: String, name: String, version: AsrModelVersion, repo: Repo, downloadMB: Int
   ) -> CatalogueEntry {
@@ -83,6 +98,7 @@ struct ParakeetTranscriber: TranscriptionEngine {
 
   func transcribe(_ audio: Audio, language: String?, progress: Progress) async throws -> [Word] {
     progress.activity("Loading \(name)")
+    FluidAudioEngine.pinRevisions()
     let directory = FluidAudioEngine.modelsRoot(home).appendingPathComponent(repo.folderName)
     let models = try await AsrModels.downloadAndLoad(
       to: directory, version: version,
@@ -125,6 +141,40 @@ struct ParakeetTranscriber: TranscriptionEngine {
       Word($0.word, $0.startTime, $0.endTime)
     }
   }
+
+  /// Many segments with one model load (speaker turns).
+  func transcribe(segments: [Audio], language: String?, progress: Progress) async throws
+    -> [[Word]]
+  {
+    progress.activity("Loading \(name)")
+    FluidAudioEngine.pinRevisions()
+    let directory = FluidAudioEngine.modelsRoot(home).appendingPathComponent(repo.folderName)
+    let models = try await AsrModels.downloadAndLoad(
+      to: directory, version: version,
+      progressHandler: FluidAudioEngine.downloadHandler(name, progress))
+    let manager = AsrManager(config: .default, models: models)
+    progress.stage("Transcribing turns")
+    var result: [[Word]] = []
+    do {
+      for (i, segment) in segments.enumerated() {
+        try Task.checkCancellation()
+        var state = TdtDecoderState.make()
+        let decoded = try await manager.transcribe(
+          segment.samples, decoderState: &state,
+          language: language.flatMap(Language.init(rawValue:)))
+        result.append(
+          buildWordTimings(from: decoded.tokenTimings ?? []).map {
+            Word($0.word, $0.startTime, $0.endTime)
+          })
+        progress.update(Double(i + 1) / Double(max(1, segments.count)))
+      }
+    } catch {
+      await manager.cleanup()
+      throw error
+    }
+    await manager.cleanup()
+    return result
+  }
 }
 
 struct NemotronLabeller: SpeakerEngine {
@@ -137,6 +187,7 @@ struct NemotronLabeller: SpeakerEngine {
     }
     let name = "Nemotron-3 (\(preset))"
     progress.activity("Loading \(name)")
+    FluidAudioEngine.pinRevisions()
     // The offline profile is GPU-only (it exceeds the ANE compiler's limits); the split
     // w8a8 profiles are built for the ANE.
     let units: MLComputeUnits = config.splitGraph ? .all : .cpuAndGPU
