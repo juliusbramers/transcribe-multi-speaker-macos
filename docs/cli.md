@@ -4,7 +4,7 @@ How `tmsm` behaves when a script or another program calls it: what goes to stdou
 
 ## The rules
 
-- **A run never asks.** `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4), language `auto`, output to the Desktop, and the configured preset (else `default`). Models that are missing are downloaded, with progress on stderr.
+- **A run never asks**, with one exception: the very first run, when a person is at a terminal (stdin, stdout and stderr all terminals) and passes none of `-`, `--output -`, `--preset`, `--json` or `--quiet`. That run asks once for a preset. Anything a script does skips the question. Otherwise `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4), language `auto`, output to the Desktop, and the configured preset (else `default`). Models that are missing are downloaded, with progress on stderr.
 - **stdout holds only the result**: the path of the written file, the Markdown itself with `--output -`, or one JSON object with `--json`. Everything else goes to stderr.
 - **Progress goes to stderr.** In a terminal it is one redrawn line. Without one, it is a plain line per stage (`tmsm: Transcribing`). `--quiet` turns it off.
 - **Errors**: one line, `tmsm: <message>`, on stderr. The exit code is non-zero.

@@ -12,13 +12,13 @@ d="$(mktemp -d)" && cd "$d" && r=https://github.com/juliusbramers/transcribe-mul
 
 ### For agents and scripts
 
-The same line, then straight to Markdown on stdout (no file, no questions, missing models downloaded on the way):
+The same steps, then straight to Markdown on stdout: no file, no questions, missing models downloaded on the way. Everything else, including the checksum line, goes to stderr, and the transcription runs only if the install succeeded:
 
 ```sh
-d="$(mktemp -d)" && cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO "$r/download/v$v/$f" && curl -fsSL "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install --no-setup >&2; cd ~ && rm -rf "$d" && ~/.tmsm/tmsm ~/memo.m4a --output - --quiet > memo.md
+d="$(mktemp -d)" && (cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO "$r/download/v$v/$f" && curl -fsSL "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install --no-setup) >&2; s=$?; rm -rf "$d"; [ "$s" -eq 0 ] && ~/.tmsm/tmsm ~/memo.m4a --output - --quiet
 ```
 
-After that, `cat memo.m4a | tmsm - --output - --quiet` works too. [docs/cli.md](docs/cli.md) has the pipes, exit codes and the determinism guarantee.
+Add `> memo.md` to keep the transcript. After that, `cat memo.m4a | tmsm - --output - --quiet` works too. [docs/cli.md](docs/cli.md) has the pipes, exit codes and the determinism guarantee.
 
 ### What the install line does
 
