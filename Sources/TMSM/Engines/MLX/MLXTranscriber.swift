@@ -139,16 +139,18 @@ struct MLXTranscriber: TranscriptionEngine {
     let words = text.split(whereSeparator: \.isWhitespace).map { $0.lowercased() }
     for n in 1...3 {
       guard words.count >= n * loopRepeats else { continue }
-      var run = 1
-      var i = n
-      while i + n <= words.count {
-        if Array(words[i..<(i + n)]) == Array(words[(i - n)..<i]) {
-          run += 1
-          if run >= loopRepeats { return true }
-        } else {
-          run = 1
+      for phase in 0..<n {
+        var run = 1
+        var i = phase + n
+        while i + n <= words.count {
+          if Array(words[i..<(i + n)]) == Array(words[(i - n)..<i]) {
+            run += 1
+            if run >= loopRepeats { return true }
+          } else {
+            run = 1
+          }
+          i += n
         }
-        i += n
       }
     }
     return false

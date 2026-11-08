@@ -73,8 +73,13 @@ public enum PresetRouting {
       if let language {
         _ = try route(preset, language: language, catalogue: catalogue)
       } else if !entry.languages.isEmpty {
+        // A joint model cannot detect (it takes no language); the standard detectors do.
+        let detectors =
+          entry.kind == .joint
+          ? Presets.detectors.filter { id in catalogue.entries.contains { $0.id == id } }
+          : [entry.id]
         code = try await detect(
-          audio, detectors: [entry.id], candidates: candidates, home: home,
+          audio, detectors: detectors, candidates: candidates, home: home,
           catalogue: catalogue, progress: progress)
       }
       return Choice(entry: entry, strategy: preset.strategy, route: nil, language: code)

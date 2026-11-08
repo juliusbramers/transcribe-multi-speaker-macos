@@ -153,6 +153,10 @@ public enum Presets {
   static let moss = "moss-transcribe-diarize-0.9b-8bit"
   static let speakers = "nemotron3-offline"
 
+  /// The language detectors every preset uses, in order: Ultra first, Qwen3-ASR when Ultra is
+  /// unsure or hears a language it can't write.
+  static let detectors = [ultra, qwen3]
+
   static let qwen3Note =
     "this language needs Qwen3-ASR 1.7B instead of Parakeet Ultra: slower, and about 6 GB of RAM"
 
@@ -164,7 +168,7 @@ public enum Presets {
       ramGB: 0.4...0.4,
       routing: LanguageRouting(
         routes: [.init(ultra, .windows), .init(qwen3, .turnwise, note: qwen3Note)],
-        detectors: [ultra, qwen3]))
+        detectors: detectors))
     p.labelsByDefault = false
     return p
   }()

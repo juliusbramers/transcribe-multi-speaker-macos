@@ -177,13 +177,19 @@ public enum TurnwiseDecoding {
   /// speaker (engine index). An engine that times its words hears the padded piece, and a word
   /// belongs to the piece its middle falls in; one that does not hears the bare turn and every
   /// word is kept. Times are clamped into the piece.
+  ///
+  /// Two neighbouring pieces both hear the audio around their cut, so a word there can come
+  /// out of both decodes with slightly different times. After the middle rule, each cut is
+  /// reconciled: the same word accepted on both sides is kept once (where it lies deeper
+  /// inside its piece), and a word both sides pushed across the cut is kept by the side that
+  /// heard it first.
   public static func decode(
     _ audio: Audio, pieces: [Piece], engine: any TranscriptionEngine, language: String?,
     progress: Progress
   ) async throws -> (words: [Word], speakers: [Int]) {
     let minimum = Int(minimumSeconds * Double(Audio.sampleRate))
-    let pieces =
-      engine.timesWords ? pieces : pieces.map { Piece(speaker: $0.speaker, range: $0.range) }
+    let timed = engine.timesWords
+    let pieces = timed ? pieces : pieces.map { Piece(speaker: $0.speaker, range: $0.range) }
     let segments = pieces.map { piece -> Audio in
       var samples = Array(audio.samples[piece.padded])
       if samples.count < minimum {
@@ -193,26 +199,84 @@ public enum TurnwiseDecoding {
     }
     let decoded = try await engine.transcribe(
       segments: segments, language: language, progress: progress)
-    var words: [Word] = []
-    var speakers: [Int] = []
     let rate = Double(Audio.sampleRate)
+
+    // Per piece: the words it owns, and the words it heard but whose middle lies past a cut.
+    var owned: [[Word]] = []
+    var spilled: [[Word]] = []
     for (piece, pieceWords) in zip(pieces, decoded) {
       let offset = Double(piece.padded.lowerBound) / rate
       let from = Double(piece.range.lowerBound) / rate
       let to = Double(piece.range.upperBound) / rate
+      let isFirst = piece.range.lowerBound == 0
+      let isLast = piece.range.upperBound == audio.samples.count
+      var mine: [Word] = []
+      var spill: [Word] = []
       for w in pieceWords {
         let start = offset + max(w.start, 0)
         let end = offset + max(w.end, max(w.start, 0))
         let middle = (start + end) / 2
-        // The first piece keeps what lies before it, the last what lies after.
-        let isFirst = piece.range.lowerBound == 0
-        let isLast = piece.range.upperBound == audio.samples.count
-        guard (middle >= from || isFirst) && (middle < to || isLast) else { continue }
-        let s = min(max(start, from), to)
-        words.append(Word(w.text, s, min(max(end, s), to)))
+        // Untimed engines heard only the turn: every word is theirs. The first piece keeps
+        // what lies before it, the last what lies after.
+        let inside = !timed || (middle >= from || isFirst) && (middle < to || isLast)
+        if inside {
+          mine.append(Word(w.text, start, end))
+        } else {
+          spill.append(Word(w.text, start, end))
+        }
+      }
+      owned.append(mine)
+      spilled.append(spill)
+    }
+
+    if timed {
+      for i in pieces.indices.dropLast() {
+        let cut = Double(pieces[i].range.upperBound) / rate
+        let near = contextSeconds * 2
+        // The same word accepted on both sides of the cut: keep the deeper copy.
+        for (k, right) in owned[i + 1].enumerated() where right.start < cut + near {
+          guard
+            let j = owned[i].lastIndex(where: {
+              $0.end > cut - near && same($0.text, right.text)
+            })
+          else { continue }
+          let left = owned[i][j]
+          if cut - (left.start + left.end) / 2 >= (right.start + right.end) / 2 - cut {
+            owned[i + 1].remove(at: k)
+          } else {
+            owned[i].remove(at: j)
+          }
+          break
+        }
+        // A word both sides heard but neither kept: the left side keeps it.
+        for w in spilled[i] where (w.start + w.end) / 2 < cut + near {
+          let keptRight = owned[i + 1].contains { $0.start < cut + near && same($0.text, w.text) }
+          let keptLeft = owned[i].contains { $0.end > cut - near && same($0.text, w.text) }
+          if !keptRight && !keptLeft { owned[i].append(w) }
+        }
+      }
+    }
+
+    var words: [Word] = []
+    var speakers: [Int] = []
+    for (piece, mine) in zip(pieces, owned) {
+      let from = Double(piece.range.lowerBound) / rate
+      let to = Double(piece.range.upperBound) / rate
+      for w in mine.sorted(by: { ($0.start, $0.end) < ($1.start, $1.end) }) {
+        let s = min(max(w.start, from), to)
+        words.append(Word(w.text, s, min(max(w.end, s), to)))
         speakers.append(piece.speaker)
       }
     }
     return (words, speakers)
+  }
+
+  /// The same word, ignoring case and punctuation.
+  static func same(_ a: String, _ b: String) -> Bool {
+    func key(_ s: String) -> String {
+      String(s.lowercased().filter { $0.isLetter || $0.isNumber })
+    }
+    let ka = key(a)
+    return !ka.isEmpty && ka == key(b)
   }
 }

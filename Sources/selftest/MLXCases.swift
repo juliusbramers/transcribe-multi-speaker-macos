@@ -205,6 +205,15 @@ enum MLXCases {
         "setup fetches MOSS and Ultra for en/de")
     }
 
+    t.test("qwen3: a looping decode is recognised at any phase") {
+      t.expect(MLXTranscriber.loops("a b a b a b a b"), true)
+      t.expect(MLXTranscriber.loops("prefix a b a b a b a b"), true, "odd phase")
+      t.expect(MLXTranscriber.loops("x a b c a b c a b c a b c"), true, "trigram, phase 1")
+      t.expect(MLXTranscriber.loops("das ist ja das ist ja gut"), false, "two repeats are speech")
+      t.expect(MLXTranscriber.loops("ja ja ja"), false, "three is still speech")
+      t.expect(MLXTranscriber.loops(""), false)
+    }
+
     t.test("moss: policy by length, and an incomplete result is not used") {
       t.expect(MossPolicy.options(duration: 600)?.kvCachePrecision, .float16)
       t.expect(MossPolicy.options(duration: 600)?.maxTokens, 6000)
@@ -464,56 +473,129 @@ enum MLXCases {
       t.expect(SpeakerSegments.clean([]), [])
     }
 
+    /// Runs `decode` synchronously for tests.
+    func decode(
+      _ audio: Audio, _ pieces: [TurnwiseDecoding.Piece], _ engine: any TranscriptionEngine
+    ) -> (words: [Word], speakers: [Int])? {
+      let done = DispatchSemaphore(value: 0)
+      let result = Mutex<(words: [Word], speakers: [Int])?>(nil)
+      Task {
+        let r = try? await TurnwiseDecoding.decode(
+          audio, pieces: pieces, engine: engine, language: "de", progress: .silent)
+        result.withLock { $0 = r }
+        done.signal()
+      }
+      done.wait()
+      return result.withLock { $0 }
+    }
+
     t.test("turns: words take their turn's speaker, clamped to the real turn length") {
       let audio = Audio(samples: [Float](repeating: 0, count: 10 * sr))
       let pieces = [
         TurnwiseDecoding.Piece(speaker: 3, range: 0..<(sr / 2)),
         TurnwiseDecoding.Piece(speaker: 1, range: (sr / 2)..<(10 * sr)),
       ]
-      let done = DispatchSemaphore(value: 0)
-      let result = Mutex<(words: [Word], speakers: [Int])?>(nil)
-      Task {
-        let r = try? await TurnwiseDecoding.decode(
-          audio, pieces: pieces, engine: ShortWord(), language: "de", progress: .silent)
-        result.withLock { $0 = r }
-        done.signal()
+      // The first (0.5 s, zero-padded to 1 s) piece hears a word running to 0.9 s whose middle
+      // lies past its end; the second hears a different word. Nothing on the right matches, so
+      // the left keeps its word, clamped to the turn.
+      struct Edge: TranscriptionEngine {
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          audio.duration < 1.5 ? [Word("w", 0.2, 0.9)] : [Word("v", 0.2, 0.4)]
+        }
       }
-      done.wait()
-      let r = result.withLock { $0 }
+      let r = decode(audio, pieces, Edge())
       t.expect(r?.speakers ?? [], [3, 1])
-      t.expect(r?.words.first, Word("w", 0.2, 0.5), "padded 0.5 s turn clamps to 0.5 s")
-      t.expect(r?.words.last, Word("w", 0.7, 1.0))
+      t.expect(r?.words.first, Word("w", 0.2, 0.5), "clamped to the 0.5 s turn")
+      t.expect(r?.words.last, Word("v", 0.7, 0.9))
+    }
+
+    t.test("turns: an untimed engine keeps every word of a short turn") {
+      let audio = Audio(samples: [Float](repeating: 0, count: 10 * sr))
+      let pieces = TurnwiseDecoding.plan(
+        segments: [SpeakerSegment(0, 0, 3.5), SpeakerSegment(1, 4, 4.4), SpeakerSegment(0, 5, 10)],
+        sampleCount: 10 * sr, maxSpeakers: 4, energy: flat)
+      t.expect(pieces.count, 3, "the 0.4 s reply nobody talks over or around is a turn")
+      // Spread evenly over the zero-padded second, as MLX engines do.
+      struct Spread: TranscriptionEngine {
+        var timesWords: Bool { false }
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          [Word("ja", 0, audio.duration / 2), Word("genau", audio.duration / 2, audio.duration)]
+        }
+      }
+      let r = decode(audio, pieces, Spread())
+      t.expect(r?.words.count, 6, "two words per turn, none lost")
+      t.expect(r?.speakers, [0, 0, 1, 1, 0, 0])
+      let reply = (r?.words.count ?? 0) > 3 ? r?.words[3] : nil
+      t.expect(
+        reply.map { $0.start >= 3.7 && $0.end <= 4.7 } ?? false,
+        "inside the turn (gaps split in the middle)")
     }
 
     t.test("turns: a word heard in the context belongs to the piece its middle falls in") {
-      // Two pieces of speaker 0 and 1; the engine hears the whole padded audio and reports one
-      // word per second of it.
+      // The audio encodes its own time (sample value = seconds), so an engine can name each
+      // word by where it really is, whatever crop it hears: one word per whole second.
       struct Ticker: TranscriptionEngine {
         func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
           async throws -> [Word]
         {
-          (0..<Int(audio.duration)).map { Word("t\($0)", Double($0) + 0.1, Double($0) + 0.9) }
+          let offset = Double(audio.samples.first ?? 0)
+          var words: [Word] = []
+          var t = offset.rounded(.up)
+          while t < offset + audio.duration && t < 10 {
+            words.append(Word("t\(Int(t))", t - offset + 0.1, t - offset + 0.9))
+            t += 1
+          }
+          return words
         }
       }
-      let audio = Audio(samples: [Float](repeating: 0, count: 10 * sr))
+      let samples = (0..<(10 * sr)).map { Float($0) / Float(sr) }
+      let audio = Audio(samples: samples)
       let pieces = TurnwiseDecoding.plan(
         segments: [SpeakerSegment(0, 0, 4), SpeakerSegment(1, 4, 10)], sampleCount: 10 * sr,
         maxSpeakers: 4, energy: flat)
-      let done = DispatchSemaphore(value: 0)
-      let result = Mutex<(words: [Word], speakers: [Int])?>(nil)
-      Task {
-        let r = try? await TurnwiseDecoding.decode(
-          audio, pieces: pieces, engine: Ticker(), language: nil, progress: .silent)
-        result.withLock { $0 = r }
-        done.signal()
-      }
-      done.wait()
-      let r = result.withLock { $0 }
-      t.expect(r?.words.count, 10, "every second once, none twice")
+      let r = decode(audio, pieces, Ticker())
+      t.expect(r?.words.map(\.text), (0..<10).map { "t\($0)" }, "every second once, none twice")
       t.expect(r?.speakers, [0, 0, 0, 0, 1, 1, 1, 1, 1, 1])
-      let starts = (r?.words ?? []).map { ($0.start * 10).rounded() / 10 }
-      t.expect(starts, [0.1, 1.1, 2.1, 3.1, 4.0, 4.8, 5.8, 6.8, 7.8, 8.8], "file times, clamped")
-      t.expect(r?.words[4].text, "t0", "the second piece's first word is 0.4 s into its context")
+    }
+
+    t.test("turns: a word at the cut is kept once, and never lost") {
+      // Sample values encode the time, so the engine knows which side of the cut it hears.
+      let audio = Audio(samples: (0..<(8 * sr)).map { Float($0) / Float(sr) })
+      let pieces = TurnwiseDecoding.plan(
+        segments: [SpeakerSegment(0, 0, 4), SpeakerSegment(1, 4, 8)], sampleCount: 8 * sr,
+        maxSpeakers: 4, energy: flat)
+      t.expect(pieces.map(\.range.lowerBound), [0, 4 * sr], "flat energy: the cut stays at 4 s")
+      // Both sides hear "cut" around 4 s: the left places it 3.8–4.3 (middle 4.05, past the
+      // cut), the right at 3.75–4.15 in file time (middle 3.95, before the cut).
+      struct Disagree: TranscriptionEngine {
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          audio.samples.first == 0
+            ? [Word("links", 1, 2), Word("cut", 3.8, 4.3)]  // left piece, padded 0–4.3
+            : [Word("Cut.", 0.05, 0.45), Word("rechts", 1, 2)]  // right piece, padded 3.7–8
+        }
+      }
+      let r = decode(audio, pieces, Disagree())
+      t.expect(r?.words.map(\.text), ["links", "cut", "rechts"], "the left side keeps it")
+      t.expect(r?.speakers, [0, 0, 1])
+      // Both sides keep it: the deeper copy survives.
+      struct Agree: TranscriptionEngine {
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          audio.samples.first == 0
+            ? [Word("links", 1, 2), Word("cut", 3.5, 3.9)]  // middle 3.7: left keeps
+            : [Word("cut", 0.2, 0.7), Word("rechts", 1, 2)]  // 3.9–4.4: middle 4.15, right keeps
+        }
+      }
+      let r2 = decode(audio, pieces, Agree())
+      t.expect(r2?.words.map(\.text), ["links", "cut", "rechts"], "kept once")
+      t.expect(r2?.speakers, [0, 0, 1], "deeper on the left (0.3 s in) than on the right (0.15 s)")
     }
 
     t.test("presets: every preset says how it combines speech and speakers") {

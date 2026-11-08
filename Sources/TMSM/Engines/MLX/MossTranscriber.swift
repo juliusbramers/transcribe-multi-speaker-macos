@@ -17,8 +17,12 @@ struct MossTranscriber: JointEngine {
       return JointResult(words: [], speakers: [], segments: [], complete: false)
     }
     let result = try await decode(audio, options: options, progress: progress)
-    // Not complete when the decoder was cut off, or skipped audible speech on the way.
-    guard result.complete, MossTranscriber.coversSpeech(result.segments, of: audio) else {
+    // Not complete when the decoder was cut off, wrote no segments for audible audio, or
+    // skipped audible speech on the way.
+    guard result.complete,
+      !result.words.isEmpty || Chunking.isSilent(audio.samples, 0..<audio.samples.count),
+      MossTranscriber.coversSpeech(result.segments, of: audio)
+    else {
       return JointResult(
         words: result.words, speakers: result.speakers, segments: result.segments,
         complete: false)
