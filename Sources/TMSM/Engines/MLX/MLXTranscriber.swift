@@ -39,7 +39,7 @@ struct MLXTranscriber: TranscriptionEngine {
     var texts: [String] = []
     for (i, window) in windows.enumerated() {
       try Task.checkCancellation()
-      let samples = Array(audio.samples[window])
+      let samples = WindowPadding.padded(audio.samples[window])
       if Chunking.meanSquare(audio.samples, window) < Chunking.silenceMeanSquare {
         texts.append("")
       } else {
@@ -104,7 +104,8 @@ struct MLXTranscriber: TranscriptionEngine {
       let offset = Double(window.lowerBound) / Double(Audio.sampleRate)
       let length = Double(window.count) / Double(Audio.sampleRate)
       let aligned = aligner.alignLong(
-        audio: Array(audio.samples[window]), text: text, sampleRate: Audio.sampleRate,
+        audio: WindowPadding.padded(audio.samples[window]), text: text,
+        sampleRate: Audio.sampleRate,
         language: languageName)
       words += WordTiming.place(
         aligned.map { ($0.text, Double($0.startTime), Double($0.endTime)) },
@@ -119,31 +120,108 @@ struct MLXTranscriber: TranscriptionEngine {
 
 /// Turns aligner output into tmsm words.
 enum WordTiming {
-  /// Clamps aligned words into their window and shifts them to file time. When the aligner
-  /// returns nothing for a non-empty text, the text's words are spread evenly over the window,
-  /// so no transcribed word is lost.
+  /// The recognised text's words, with the aligner's times where it gave them, shifted to file
+  /// time and clamped into the window.
+  ///
+  /// The aligner can return fewer words than the text holds (it stops when its timings
+  /// saturate, or returns nothing). Words it missed keep their place and get times spread over
+  /// the gap between their aligned neighbours, so no transcribed word is lost.
   static func place(
     _ aligned: [(text: String, start: Double, end: Double)], text: String, offset: Double,
     length: Double
   ) -> [Word] {
-    var result: [Word] = []
-    if aligned.isEmpty {
-      let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
-      guard !tokens.isEmpty else { return [] }
-      let step = length / Double(tokens.count)
-      for (i, token) in tokens.enumerated() {
-        result.append(Word(token, offset + Double(i) * step, offset + Double(i + 1) * step))
-      }
-      return result
-    }
+    let tokens = joinPunctuation(text.split(whereSeparator: \.isWhitespace).map(String.init))
+    guard !tokens.isEmpty else { return [] }
+    var timed: [(text: String, start: Double, end: Double)] = []
     var last = 0.0
     for word in aligned {
       let trimmed = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmed.isEmpty else { continue }
       let start = min(max(word.start, last), length)
-      let end = min(max(word.end, start), length)
-      result.append(Word(trimmed, offset + start, offset + end))
+      timed.append((trimmed, start, min(max(word.end, start), length)))
       last = start
+    }
+    // More aligned words than spaces: a script without spaces, which the aligner splits itself.
+    if timed.count > tokens.count {
+      return unspaced(timed, text: text, offset: offset, length: length)
+    }
+
+    // Match text words to aligned words in order; the aligner may skip one now and then.
+    var times = [(start: Double, end: Double)?](repeating: nil, count: tokens.count)
+    var j = 0
+    for (i, token) in tokens.enumerated() where j < timed.count {
+      let key = normalise(token)
+      if let k = (j..<min(j + 3, timed.count)).first(where: { normalise(timed[$0].text) == key }) {
+        times[i] = (timed[k].start, timed[k].end)
+        j = k + 1
+      }
+    }
+    // Spread unmatched runs over the gap between their neighbours.
+    var i = 0
+    while i < tokens.count {
+      guard times[i] == nil else {
+        i += 1
+        continue
+      }
+      var k = i
+      while k < tokens.count, times[k] == nil { k += 1 }
+      let from = i > 0 ? times[i - 1]!.end : 0
+      let to = max(from, k < tokens.count ? times[k]!.start : length)
+      let step = (to - from) / Double(k - i)
+      for n in i..<k {
+        times[n] = (from + Double(n - i) * step, from + Double(n - i + 1) * step)
+      }
+      i = k
+    }
+    return zip(tokens, times).map { Word($0, offset + $1!.start, offset + $1!.end) }
+  }
+
+  /// Unspaced scripts: the aligner's words, plus any tail of the text it did not reach as one
+  /// word at the end of the window.
+  private static func unspaced(
+    _ timed: [(text: String, start: Double, end: Double)], text: String, offset: Double,
+    length: Double
+  ) -> [Word] {
+    var words = timed.map { Word($0.text, offset + $0.start, offset + $0.end) }
+    let covered = timed.map(\.text).joined().filter { !$0.isWhitespace }.count
+    let all = text.filter { !$0.isWhitespace }
+    if covered < all.count {
+      let start = timed.last?.end ?? 0
+      words.append(Word(String(all.dropFirst(covered)), offset + start, offset + length))
+    }
+    return words
+  }
+
+  /// Punctuation-only tokens ("—", "…") join the word before them, as the aligner does.
+  static func joinPunctuation(_ tokens: [String]) -> [String] {
+    var result: [String] = []
+    for token in tokens {
+      if normalise(token).isEmpty, !result.isEmpty {
+        result[result.count - 1] += " " + token
+      } else {
+        result.append(token)
+      }
+    }
+    return result
+  }
+
+  /// Letters and digits only, lowercased: how the aligner's words and the text's are compared.
+  static func normalise(_ word: String) -> String {
+    String(
+      word.lowercased().unicodeScalars.filter(CharacterSet.alphanumerics.contains).map(
+        Character.init))
+  }
+}
+
+/// Models need a minimum of audio to make one encoder frame; shorter windows are padded with
+/// silence (times are clamped to the real length afterwards).
+enum WindowPadding {
+  static let minimumSamples = Audio.sampleRate / 2
+
+  static func padded(_ samples: ArraySlice<Float>) -> [Float] {
+    var result = Array(samples)
+    if result.count < minimumSamples {
+      result += [Float](repeating: 0, count: minimumSamples - result.count)
     }
     return result
   }

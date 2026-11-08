@@ -193,6 +193,39 @@ enum MLXCases {
       t.expect(words, [Word("Hallo", 100.5, 101.0), Word("Welt.", 100.8, 125.0)])
     }
 
+    t.test("words: a partial alignment keeps the missing tail, timed after the last aligned word") {
+      let words = WordTiming.place(
+        [("Eins", 1, 2), ("zwei", 2, 3)], text: "Eins zwei drei vier", offset: 0, length: 7)
+      t.expect(words.map(\.text), ["Eins", "zwei", "drei", "vier"])
+      t.expect(words[2].start, 3)
+      t.expect(words[3].end, 7)
+    }
+
+    t.test("words: a word the aligner skipped keeps its place between its neighbours") {
+      let words = WordTiming.place(
+        [("one", 0, 1), ("three", 3, 4)], text: "one two three — four", offset: 10, length: 6)
+      t.expect(words.map(\.text), ["one", "two", "three —", "four"])
+      t.expect(words[1].start, 11)
+      t.expect(words[1].end, 13)
+      t.expect(words[3].start, 14)
+      t.expect(words[3].end, 16)
+    }
+
+    t.test("words: unspaced scripts keep the aligner's split and any unreached tail") {
+      let words = WordTiming.place(
+        [("今日", 0, 1), ("は", 1, 2), ("晴れ", 2, 3)], text: "今日は晴れです", offset: 0, length: 5)
+      t.expect(words.map(\.text), ["今日", "は", "晴れ", "です"])
+      t.expect(words.last?.end, 5)
+    }
+
+    t.test("windows: very short windows are padded to the model minimum") {
+      let samples = [Float](repeating: 0.5, count: 100)
+      t.expect(WindowPadding.padded(samples[0..<100]).count, Audio.sampleRate / 2)
+      t.expect(WindowPadding.padded(samples[0..<100]).prefix(100).allSatisfy { $0 == 0.5 }, "kept")
+      let long = [Float](repeating: 0, count: Audio.sampleRate)
+      t.expect(WindowPadding.padded(long[0..<long.count]).count, Audio.sampleRate)
+    }
+
     t.test("words: no alignment spreads the text over the window, losing no word") {
       let words = WordTiming.place([], text: "one two  three four", offset: 10, length: 4)
       t.expect(words.map(\.text), ["one", "two", "three", "four"])
