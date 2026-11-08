@@ -482,6 +482,20 @@ enum CoreCases {
         "the other run's files stay")
       home.removeRunTemporary(root)
       t.expect(FileManager.default.fileExists(atPath: root.path), true, "refuses non-run folders")
+
+      // Stale cleanup: an old folder without a live lock goes, an old locked one stays.
+      let old = Date(timeIntervalSinceNow: -3 * 86_400)
+      let crashed = home.temporary.appendingPathComponent("run-crashed", isDirectory: true)
+      try FileManager.default.createDirectory(at: crashed, withIntermediateDirectories: true)
+      try Data().write(to: crashed.appendingPathComponent(".lock"))
+      for dir in [crashed, b] {
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: dir.path)
+      }
+      _ = try home.activate(runID: "c")
+      t.expect(FileManager.default.fileExists(atPath: crashed.path), false, "crashed run removed")
+      t.expect(FileManager.default.fileExists(atPath: b.path), true, "live old run kept")
+      home.removeRunTemporary(b)
+      home.removeRunTemporary(home.temporary.appendingPathComponent("run-c", isDirectory: true))
     }
 
     t.test("config: missing file means no choice; round trip") {

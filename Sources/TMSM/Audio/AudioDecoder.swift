@@ -17,10 +17,12 @@ public enum AudioDecoder {
       throw TMSMError.inputNotFound(url.path)
     }
     let avError: Error
+    // AVFoundation's length estimate, when it can open the file; ffmpeg's output is held to it too.
+    let expected = try? expectedSamples(url)
     do {
       let samples = try AudioConverter(sampleRate: Double(Audio.sampleRate))
         .resampleAudioFile(url)
-      let expected = try expectedSamples(url)
+      let expected = try expected ?? expectedSamples(url)
       if samples.isEmpty {
         avError = TMSMError.emptyAudio(url.path)
       } else if isTruncated(decoded: samples.count, expected: expected) {
@@ -41,6 +43,10 @@ public enum AudioDecoder {
     }
     let samples = try decodeWithFFmpeg(url, ffmpeg: ffmpeg)
     guard !samples.isEmpty else { throw TMSMError.emptyAudio(url.path) }
+    if let expected, isTruncated(decoded: samples.count, expected: expected) {
+      throw TMSMError.undecodableAudio(
+        url.path, "decoding stopped at \(seconds(samples.count)) of \(seconds(expected))")
+    }
     return Audio(samples: samples)
   }
 
@@ -48,7 +54,8 @@ public enum AudioDecoder {
     let process = Process()
     process.executableURL = ffmpeg
     process.arguments = [
-      "-nostdin", "-hide_banner", "-loglevel", "error", "-i", url.path,
+      // -xerror: stop on the first decoding error instead of skipping damaged frames.
+      "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-i", url.path,
       "-vn", "-ac", "1", "-ar", String(Audio.sampleRate), "-f", "f32le", "pipe:1",
     ]
     let out = Pipe()

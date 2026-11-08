@@ -1,5 +1,7 @@
+import Darwin
 import FluidAudio
 import Foundation
+import Synchronization
 
 /// The one root that holds everything tmsm writes, apart from the transcripts themselves:
 /// models, config and every engine cache.
@@ -55,6 +57,7 @@ public struct TMSMHome: Sendable, Equatable {
     for dir in [models, runTemp, urlCache, huggingFace] {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     }
+    try TMSMHome.lock(runTemp)
     setenv("TMPDIR", runTemp.path + "/", 1)
     setenv("HF_HOME", huggingFace.path, 1)
     setenv("HF_HUB_CACHE", huggingFace.appendingPathComponent("hub").path, 1)
@@ -72,9 +75,11 @@ public struct TMSMHome: Sendable, Equatable {
     guard runTemp.deletingLastPathComponent().standardizedFileURL == temporary.standardizedFileURL
     else { return }
     try? FileManager.default.removeItem(at: runTemp)
+    TMSMHome.release(runTemp)
   }
 
-  /// Run folders a crashed run left behind, untouched for a day, are removed.
+  /// Old run folders are removed only if no live run holds their lock: a crashed run's lock goes
+  /// with its process. Age alone proves nothing (a slow download leaves the folder's date alone).
   func removeStaleTemporary(olderThan age: TimeInterval = 86_400, now: Date = Date()) {
     let fm = FileManager.default
     let items =
@@ -83,7 +88,34 @@ public struct TMSMHome: Sendable, Equatable {
     for item in items where item.lastPathComponent.hasPrefix("run-") {
       let modified = try? item.resourceValues(forKeys: [.contentModificationDateKey])
         .contentModificationDate
-      if let modified, now.timeIntervalSince(modified) > age { try? fm.removeItem(at: item) }
+      guard let modified, now.timeIntervalSince(modified) > age else { continue }
+      let fd = open(item.appendingPathComponent(TMSMHome.lockName).path, O_RDONLY)
+      if fd >= 0 {
+        defer { close(fd) }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { continue }  // a live run holds it
+      }
+      try? fm.removeItem(at: item)
     }
+  }
+
+  // MARK: Run locks
+
+  static let lockName = ".lock"
+  private static let held = Mutex<[String: Int32]>([:])
+
+  /// Takes an exclusive advisory lock on the run folder, held until `release` or process exit.
+  static func lock(_ runTemp: URL) throws {
+    let path = runTemp.appendingPathComponent(lockName).path
+    let fd = open(path, O_RDWR | O_CREAT, 0o600)
+    guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+      if fd >= 0 { close(fd) }
+      throw TMSMError.outputFailed(path, "can't lock this run's temp folder")
+    }
+    held.withLock { $0[runTemp.standardizedFileURL.path] = fd }
+  }
+
+  static func release(_ runTemp: URL) {
+    let fd = held.withLock { $0.removeValue(forKey: runTemp.standardizedFileURL.path) }
+    if let fd { close(fd) }
   }
 }

@@ -157,6 +157,7 @@ struct NemotronLabeller: SpeakerEngine {
     progress.stage("Labelling speakers")
     let diarizer = Nemotron3Diarizer(config: config, models: models)
     let step = Audio.sampleRate * 30
+    let frameSeconds = Double(config.outputFrameSeconds)
     var probabilities: [Float] = []
     probabilities.reserveCapacity(
       (audio.samples.count / 160 + 1) * config.numSpeakers)
@@ -168,9 +169,13 @@ struct NemotronLabeller: SpeakerEngine {
         probabilities.append(contentsOf: chunk.probabilities)
       }
       fed = next
-      progress.update(Double(fed) / Double(audio.samples.count))
+      // Measured by frames labelled, not samples fed: the model trails by its latency.
+      let labelled = Double(probabilities.count / config.numSpeakers) * frameSeconds
+      progress.update(min(labelled / audio.duration, 0.99))
       await Task.yield()
     }
+    // The tail (all of it for files shorter than the latency) runs here, unmeasured.
+    progress.activity("Labelling speakers")
     for chunk in try diarizer.finishStream() {
       probabilities.append(contentsOf: chunk.probabilities)
     }
@@ -179,8 +184,7 @@ struct NemotronLabeller: SpeakerEngine {
       probabilities: probabilities, frameCount: frames, numSpeakers: config.numSpeakers
     ).map { SpeakerSegment($0.speakerIndex, Double($0.startSeconds), Double($0.endSeconds)) }
     let activity = SpeakerActivity(
-      frameSeconds: Double(config.outputFrameSeconds), speakers: config.numSpeakers,
-      values: probabilities)
+      frameSeconds: frameSeconds, speakers: config.numSpeakers, values: probabilities)
     return SpeakerTrack(segments: segments, activity: activity)
   }
 }
