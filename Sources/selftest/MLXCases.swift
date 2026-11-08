@@ -72,7 +72,7 @@ enum MLXCases {
             "--quiet",
           ])
           let result = try await Pipeline(home: home).run(options, progress: .silent)
-          texts.append(try Data(contentsOf: URL(fileURLWithPath: result.output)))
+          texts.append(try Data(contentsOf: URL(fileURLWithPath: result.output ?? "")))
         }
         outcome.withLock { $0 = .success(texts) }
       } catch { outcome.withLock { $0 = .failure(error) } }
@@ -315,17 +315,22 @@ enum MLXCases {
       t.expect(!Chunking.isSilent(samples, 0..<samples.count), "the quiet reply survives")
     }
 
-    t.test("language: detection is constrained and unsure text gives nil") {
+    t.test("language: detection is unconstrained; unsure text gives nil") {
       t.expect(
-        LanguageDetection.detect(
-          "Das ist ein ganz normaler deutscher Satz über das Wetter und die Arbeit.",
-          among: MLXEngine.qwen3Languages)?.code, "de")
-      t.expect(LanguageDetection.detect("", among: MLXEngine.qwen3Languages) == nil, "empty")
+        LanguageDetection.identify(
+          "Das ist ein ganz normaler deutscher Satz über das Wetter und die Arbeit.")?.code, "de")
       t.expect(
-        LanguageDetection.detect("Bonjour, ça va très bien merci.", among: ["de", "en"]) == nil
-          || LanguageDetection.detect("Bonjour, ça va très bien merci.", among: ["de", "en"])?
-            .code != "fr",
-        "never outside the candidates")
+        LanguageDetection.identify(
+          "This is an ordinary English sentence about the weather and the work today.")?.code,
+        "en")
+      // Not covered by any preset: must come out as itself, not as a supported neighbour.
+      t.expect(
+        LanguageDetection.identify("வணக்கம், இன்று வானிலை மிகவும் நன்றாக இருக்கிறது.")?.code, "ta")
+      t.expect(
+        LanguageDetection.identify("שלום, מזג האוויר היום נעים מאוד ואנחנו הולכים לעבודה.")?.code,
+        "he")
+      t.expect(LanguageDetection.identify("") == nil, "empty")
+      t.expect(LanguageDetection.identify("mm hm ok") == nil, "too little to be sure")
     }
   }
 
@@ -463,6 +468,59 @@ enum MLXCases {
       }
       done.wait()
       t.expect(results.withLock { $0 }, ["de", "de"])
+    }
+
+    t.test("routing: unsupported or unclear speech is an error, never a fallback language") {
+      let tamil = "வணக்கம், இன்று வானிலை மிகவும் நன்றாக இருக்கிறது, நாம் வேலைக்கு போகிறோம்."
+      let german = "Das ist ein ganz normaler deutscher Satz über das Wetter und die Arbeit heute."
+      func entry(_ id: String, _ languages: [String], _ text: String) -> CatalogueEntry {
+        CatalogueEntry(
+          id: id, name: id, engine: "test", languages: languages, downloadMB: 0, license: "",
+          gated: false, factory: .transcription { _ in FixedText(text: text) },
+          storage: { _ in [] })
+      }
+      let cat = Catalogue(
+        [
+          EngineRegistration(
+            engine: "test",
+            entries: [
+              entry("ultra-tamil", ["de", "en"], "va na kam in ru va ni lai"),
+              entry("qwen-tamil", ["de", "en", "ja"], tamil),
+              entry("ultra-unsure", ["de", "en"], "mm hm ok"),
+              entry("qwen-german", ["de", "en"], german),
+              entry("silent", ["de", "en"], ""),
+            ])
+        ],
+        presets: [])
+      let speech = Audio(samples: [Float](repeating: 0.1, count: 2 * Audio.sampleRate))
+      let home = TMSMHome(root: FileManager.default.temporaryDirectory)
+      let done = DispatchSemaphore(value: 0)
+      let results = Mutex<[String]>([])
+      Task {
+        for detectors in [
+          ["ultra-tamil", "qwen-tamil"], ["ultra-unsure"], ["ultra-unsure", "qwen-german"],
+          ["silent"],
+        ] {
+          do {
+            let code = try await PresetRouting.detect(
+              speech, detectors: detectors, candidates: ["de", "en", "ja"], home: home,
+              catalogue: cat, progress: .silent)
+            results.withLock { $0.append(code) }
+          } catch {
+            let text = error.localizedDescription
+            results.withLock {
+              $0.append(
+                text.contains("Tamil (ta)")
+                  ? "unsupported ta"
+                  : text.contains("Can't tell") ? "unclear" : "other: \(text)")
+            }
+          }
+        }
+        done.signal()
+      }
+      done.wait()
+      t.expect(
+        results.withLock { $0 }, ["unsupported ta", "unclear", "de", LanguageDetection.silence])
     }
   }
 }

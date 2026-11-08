@@ -79,18 +79,24 @@ public enum PresetRouting {
     return Choice(entry: entry, strategy: route?.strategy ?? preset.strategy, language: code)
   }
 
-  /// Each detector transcribes up to a minute of speech, unconditioned, and the language is read
-  /// from its text among every language the preset covers. A detector's answer counts only if
-  /// it can transcribe that language itself (its text is unreliable otherwise) or it is the last
-  /// one. With no speech, or no detector sure, the fallback language is used (with a note when
-  /// something was heard).
+  /// Each detector transcribes up to a minute of speech, unconditioned, and the language is
+  /// read from its text among every language there is, not only the preset's.
+  ///
+  /// - A detector that is sure, of a language it can transcribe itself, decides: that language
+  ///   if the preset covers it, otherwise an error naming it.
+  /// - Unsure, or a language the detector can't write (its text is unreliable then): the next
+  ///   detector tries (fast/default: Parakeet Ultra, then Qwen3-ASR).
+  /// - After the last detector: its sure answer decides as above; unsure is an error asking for
+  ///   `--language`. Never a silent fallback to some language.
+  /// - No speech, or nothing heard: `LanguageDetection.silence`; the transcript is empty.
   static func detect(
     _ audio: Audio, detectors: [String], candidates: [String], home: TMSMHome,
     catalogue: Catalogue, progress: Progress
   ) async throws -> String {
-    guard let sample = speechSample(audio) else { return LanguageDetection.fallback }
+    guard let sample = speechSample(audio) else { return LanguageDetection.silence }
     var heard = false
-    for (i, id) in detectors.enumerated() {
+    var last: (code: String, p: Double)?
+    for id in detectors {
       let entry = try catalogue.entry(id)
       guard case .transcription(let make) = entry.factory else { continue }
       progress.activity("Detecting the language")
@@ -98,16 +104,30 @@ public enum PresetRouting {
         segments: [sample], language: nil, progress: progress
       ).flatMap { $0 }
       heard = heard || !words.isEmpty
-      let text = words.map(\.text).joined(separator: " ")
-      guard let found = LanguageDetection.detect(text, among: candidates) else { continue }
-      if entry.languages.contains(found.code) || i == detectors.count - 1 { return found.code }
+      last = LanguageDetection.identify(words.map(\.text).joined(separator: " "))
+      guard let found = last, entry.languages.contains(found.code) else { continue }
+      guard candidates.contains(found.code) else {
+        throw unsupported(found.code, candidates: candidates)
+      }
+      return found.code
     }
-    if heard {
-      LanguageDetection.warn(
-        "language unclear, transcribing as \(LanguageDetection.fallback);"
-          + " pass --language to set it", progress: progress)
+    guard heard else { return LanguageDetection.silence }
+    guard let found = last else {
+      throw TMSMError.engine(
+        "Can't tell which language this recording is in. Pass --language with one of: "
+          + candidates.joined(separator: ", "))
     }
-    return LanguageDetection.fallback
+    guard candidates.contains(found.code) else {
+      throw unsupported(found.code, candidates: candidates)
+    }
+    return found.code
+  }
+
+  static func unsupported(_ code: String, candidates: [String]) -> TMSMError {
+    let name = LanguageDetection.name(code).map { "\($0) (\(code))" } ?? "'\(code)'"
+    return TMSMError.engine(
+      "This recording sounds like \(name), which this preset doesn't cover. If that's wrong, "
+        + "pass --language with one of: \(candidates.joined(separator: ", "))")
   }
 
   /// Up to `detectionWindows` windows that hold speech, about `detectionSeconds` in total,

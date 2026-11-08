@@ -21,3 +21,6 @@ models/
 .env
 .env.*
 .DS_Store
+
+# Release output (scripts/release.sh)
+dist/
