@@ -1,19 +1,24 @@
 import Foundation
 
 /// Turn-wise decoding: speakers are labelled first, the file is cut into speaker turns, and the
-/// speech model transcribes each turn on its own. Every word takes its turn's speaker.
+/// speech model transcribes each turn on its own, with a little of the neighbouring audio for
+/// context. Every word takes its turn's speaker.
 ///
 /// The turns cover the whole file, so no audio is dropped: stretches no speaker segment covers
 /// go to the neighbouring turn (split at the middle between two different speakers).
 public enum TurnwiseDecoding {
-  /// One stretch of samples spoken by one speaker (engine index).
+  /// One stretch of samples spoken by one speaker (engine index). `range` is the turn itself;
+  /// `padded` adds context on both sides and is what the model hears. Words are kept by where
+  /// their middle falls, so each word lands in exactly one turn.
   public struct Piece: Sendable, Equatable {
     public var speaker: Int
     public var range: Range<Int>
+    public var padded: Range<Int>
 
-    public init(speaker: Int, range: Range<Int>) {
+    public init(speaker: Int, range: Range<Int>, padded: Range<Int>? = nil) {
       self.speaker = speaker
       self.range = range
+      self.padded = padded ?? range
     }
   }
 
@@ -21,29 +26,40 @@ public enum TurnwiseDecoding {
   static let frameSeconds = 0.01
   /// Turns shorter than this are padded with silence before decoding, in seconds.
   public static let minimumSeconds = 1.0
+  /// Audio added before and after a turn so the model hears how it begins and ends, in
+  /// seconds. Half a word cut off at a turn boundary is otherwise read as a word of its own.
+  public static let contextSeconds = 0.3
+  /// A cut between two speakers moves to the quietest `Chunking.energySeconds` within this
+  /// distance, in seconds, so it does not fall inside a word…
+  public static let snapSeconds = 0.3
+  /// …but only to a point at most this share as loud as the original cut; otherwise there is
+  /// no pause to move to and the cut stays.
+  public static let snapGain = 0.5
 
   /// The file's turns, in order, covering `0..<sampleCount` without gaps or overlaps. Turns
   /// longer than `Chunking.targetSeconds` are split at quiet points.
   ///
-  /// Where segments of two speakers overlap, the one who started more recently has the turn
-  /// (someone talking over another takes over until they stop).
+  /// Segments are cleaned first (see `SpeakerSegments`). Where segments of two speakers
+  /// overlap, the one whose segment is longer has the turn: a listener's interjection does not
+  /// take the words of the one talking.
   public static func plan(
     segments: [SpeakerSegment], sampleCount: Int, maxSpeakers: Int,
     energy: (Range<Int>) -> Double
   ) -> [Piece] {
     guard sampleCount > 0 else { return [] }
-    let kept = SpeakerAssignment.keepLongest(segments, max(1, maxSpeakers))
-      .sorted { ($0.start, $0.speaker) < ($1.start, $1.speaker) }
+    let kept = SpeakerSegments.clean(SpeakerAssignment.keepLongest(segments, max(1, maxSpeakers)))
     let frameSamples = max(1, Int(frameSeconds * Double(Audio.sampleRate)))
     let frames = (sampleCount + frameSamples - 1) / frameSamples
     guard !kept.isEmpty else {
       return split(Piece(speaker: 0, range: 0..<sampleCount), energy: energy)
+        .map { pad($0, sampleCount: sampleCount) }
     }
 
-    // Each frame's speaker: among the segments covering its centre, the latest to start.
-    // Painting the segments in start order leaves exactly that.
+    // Each frame's speaker: among the segments covering its centre, the longest. Painting the
+    // segments shortest first leaves exactly that.
     var label = [Int?](repeating: nil, count: frames)
-    for seg in kept {
+    for seg in kept.sorted(by: { ($0.end - $0.start, $0.speaker) < ($1.end - $1.start, $1.speaker) }
+    ) {
       let first = max(0, Int((seg.start / frameSeconds - 0.5).rounded(.up)))
       let last = min(frames, Int((seg.end / frameSeconds - 0.5).rounded(.up)))
       guard first < last else { continue }
@@ -90,20 +106,54 @@ public enum TurnwiseDecoding {
       }
     }
 
+    // Sample ranges, with every cut between two speakers moved to the nearest quiet point.
+    var cuts = turns.dropFirst().map { min($0.from * frameSamples, sampleCount) }
+    let snap = Int(snapSeconds * Double(Audio.sampleRate))
+    var previous = 0
+    for i in cuts.indices {
+      let lo = max(previous + 1, cuts[i] - snap)
+      let hi = min(sampleCount - 1, cuts[i] + snap)
+      if lo < hi { cuts[i] = quietest(lo..<hi, origin: cuts[i], energy: energy) }
+      cuts[i] = max(previous, min(cuts[i], sampleCount))
+      previous = cuts[i]
+    }
     var pieces: [Piece] = []
-    for turn in turns {
-      let range =
-        min(turn.from * frameSamples, sampleCount)..<min(turn.to * frameSamples, sampleCount)
+    var start = 0
+    for (i, turn) in turns.enumerated() {
+      let end = i < cuts.count ? cuts[i] : sampleCount
+      let range = start..<end
+      start = end
       guard !range.isEmpty else { continue }
-      if let last = pieces.last, last.speaker == turn.speaker,
-        last.range.upperBound == range.lowerBound
-      {
+      if let last = pieces.last, last.speaker == turn.speaker {
         pieces[pieces.count - 1].range = last.range.lowerBound..<range.upperBound
       } else {
         pieces.append(Piece(speaker: turn.speaker, range: range))
       }
     }
-    return pieces.flatMap { split($0, energy: energy) }
+    return pieces.flatMap { split($0, energy: energy) }.map { pad($0, sampleCount: sampleCount) }
+  }
+
+  /// The centre of the quietest `Chunking.energySeconds` window inside `range` when it is at
+  /// most `snapGain` as loud as the window at `origin`; otherwise `origin`. Among equally quiet
+  /// windows, the nearest to `origin`.
+  static func quietest(_ range: Range<Int>, origin: Int, energy: (Range<Int>) -> Double) -> Int {
+    let window = max(1, Int(Chunking.energySeconds * Double(Audio.sampleRate)))
+    guard range.count > window else { return origin }
+    let at = max(range.lowerBound, min(origin - window / 2, range.upperBound - window))
+    let original = energy(at..<(at + window))
+    var best = origin
+    var quietest = Double.infinity
+    var w = range.lowerBound
+    while w + window <= range.upperBound {
+      let e = energy(w..<(w + window))
+      let centre = w + window / 2
+      if e < quietest || (e == quietest && abs(centre - origin) < abs(best - origin)) {
+        quietest = e
+        best = centre
+      }
+      w += max(1, window / 2)
+    }
+    return quietest <= snapGain * original ? best : origin
   }
 
   /// A long turn → pieces of at most `Chunking.targetSeconds`, cut at quiet points.
@@ -114,15 +164,28 @@ public enum TurnwiseDecoding {
     }.map { Piece(speaker: piece.speaker, range: (base + $0.lowerBound)..<(base + $0.upperBound)) }
   }
 
+  /// The piece with `contextSeconds` of audio added on both sides, inside the file.
+  static func pad(_ piece: Piece, sampleCount: Int) -> Piece {
+    let context = Int(contextSeconds * Double(Audio.sampleRate))
+    var p = piece
+    p.padded =
+      max(0, piece.range.lowerBound - context)..<min(sampleCount, piece.range.upperBound + context)
+    return p
+  }
+
   /// Decodes every piece with one engine call; returns the words in file time and each word's
-  /// speaker (engine index). Words a padded piece puts past its real end are clamped to it.
+  /// speaker (engine index). An engine that times its words hears the padded piece, and a word
+  /// belongs to the piece its middle falls in; one that does not hears the bare turn and every
+  /// word is kept. Times are clamped into the piece.
   public static func decode(
     _ audio: Audio, pieces: [Piece], engine: any TranscriptionEngine, language: String?,
     progress: Progress
   ) async throws -> (words: [Word], speakers: [Int]) {
     let minimum = Int(minimumSeconds * Double(Audio.sampleRate))
+    let pieces =
+      engine.timesWords ? pieces : pieces.map { Piece(speaker: $0.speaker, range: $0.range) }
     let segments = pieces.map { piece -> Audio in
-      var samples = Array(audio.samples[piece.range])
+      var samples = Array(audio.samples[piece.padded])
       if samples.count < minimum {
         samples += [Float](repeating: 0, count: minimum - samples.count)
       }
@@ -132,13 +195,21 @@ public enum TurnwiseDecoding {
       segments: segments, language: language, progress: progress)
     var words: [Word] = []
     var speakers: [Int] = []
+    let rate = Double(Audio.sampleRate)
     for (piece, pieceWords) in zip(pieces, decoded) {
-      let offset = Double(piece.range.lowerBound) / Double(Audio.sampleRate)
-      let length = Double(piece.range.count) / Double(Audio.sampleRate)
+      let offset = Double(piece.padded.lowerBound) / rate
+      let from = Double(piece.range.lowerBound) / rate
+      let to = Double(piece.range.upperBound) / rate
       for w in pieceWords {
-        let start = min(max(w.start, 0), length)
-        let end = min(max(w.end, start), length)
-        words.append(Word(w.text, offset + start, offset + end))
+        let start = offset + max(w.start, 0)
+        let end = offset + max(w.end, max(w.start, 0))
+        let middle = (start + end) / 2
+        // The first piece keeps what lies before it, the last what lies after.
+        let isFirst = piece.range.lowerBound == 0
+        let isLast = piece.range.upperBound == audio.samples.count
+        guard (middle >= from || isFirst) && (middle < to || isLast) else { continue }
+        let s = min(max(start, from), to)
+        words.append(Word(w.text, s, min(max(end, s), to)))
         speakers.append(piece.speaker)
       }
     }

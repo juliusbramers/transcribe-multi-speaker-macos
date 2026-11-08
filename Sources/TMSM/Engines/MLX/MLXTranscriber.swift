@@ -13,6 +13,9 @@ struct MLXTranscriber: TranscriptionEngine {
   let spec: MLXTranscriberSpec
   let home: TMSMHome
 
+  /// Turn words are spread evenly over their window (no aligner), so they carry no times.
+  var timesWords: Bool { false }
+
   /// One window to decode: a range of samples in one input segment.
   struct Piece {
     var segment: Int
@@ -101,9 +104,17 @@ struct MLXTranscriber: TranscriptionEngine {
         try await Qwen3ASRModel.fromPretrained(
           modelId: spec.model.repo, cacheDir: dir, offlineMode: true)
       }
+      // speech-swift masks repeated trigrams on windows over 15 s unless told not to; that
+      // rewrites natural repeats ("du möchtest … du möchtest" → "möchtes"), so it is off. A
+      // decode that does loop is redone once with a mild repetition penalty.
       return { samples, language in
-        let options = Qwen3DecodingOptions(
-          language: language.flatMap(LanguageDetection.name), temperature: 0)
+        var options = Qwen3DecodingOptions(
+          language: language.flatMap(LanguageDetection.name), temperature: 0,
+          longInputNoRepeatNgramSize: 0)
+        let text = try model.transcribeThrowing(
+          audio: samples, sampleRate: Audio.sampleRate, options: options)
+        guard MLXTranscriber.loops(text) else { return text }
+        options.repetitionPenalty = 1.1
         return try model.transcribeThrowing(
           audio: samples, sampleRate: Audio.sampleRate, options: options)
       }
@@ -119,6 +130,28 @@ struct MLXTranscriber: TranscriptionEngine {
           options: VoxtralDecodingOptions(maxTokens: 448, language: language))
       }
     }
+  }
+
+  /// True when some run of one to three words repeats itself at least `loopRepeats` times in a
+  /// row: a decoder stuck in a loop, not speech.
+  static let loopRepeats = 4
+  static func loops(_ text: String) -> Bool {
+    let words = text.split(whereSeparator: \.isWhitespace).map { $0.lowercased() }
+    for n in 1...3 {
+      guard words.count >= n * loopRepeats else { continue }
+      var run = 1
+      var i = n
+      while i + n <= words.count {
+        if Array(words[i..<(i + n)]) == Array(words[(i - n)..<i]) {
+          run += 1
+          if run >= loopRepeats { return true }
+        } else {
+          run = 1
+        }
+        i += n
+      }
+    }
+    return false
   }
 
   /// Word timings for each piece's text, grouped by segment. Loads the aligner, aligns,

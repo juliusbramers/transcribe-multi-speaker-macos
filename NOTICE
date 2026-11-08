@@ -1,4 +1,5 @@
 tmsm — transcribe multi-speaker audio on macOS
+Apache License 2.0 (see LICENSE).
 
 tmsm downloads its models from Hugging Face on first use; none is bundled in the release.
 Each model keeps its own licence. Credits:
@@ -15,6 +16,10 @@ Speech to text
   Apache-2.0. MLX conversion: aufklarer (aufklarer/Qwen3-ForcedAligner-0.6B-8bit).
 - Voxtral Mini 3B 2507: Mistral AI (mistralai/Voxtral-Mini-3B-2507), Apache-2.0.
   MLX conversion: aufklarer (aufklarer/Voxtral-Mini-3B-2507-MLX-8bit).
+
+Speech to text with speaker labels (one model)
+- MOSS-Transcribe-Diarize 0.9B: OpenMOSS team (OpenMOSS-Team/MOSS-Transcribe-Diarize),
+  Apache-2.0. MLX conversion: aufklarer (aufklarer/MOSS-Transcribe-Diarize-0.9B-MLX-INT8).
 
 Speaker labelling
 - Nemotron-3 Diarization: NVIDIA (nvidia/Nemotron-3-Diarization), OpenMDW-1.1.

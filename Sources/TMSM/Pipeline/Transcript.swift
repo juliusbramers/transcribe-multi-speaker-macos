@@ -16,22 +16,32 @@ public struct Turn: Sendable, Equatable, Codable {
 }
 
 public struct Transcript: Sendable, Equatable {
+  /// A pause at least this long starts a new paragraph in an unlabelled transcript, in seconds.
+  public static let paragraphPause = 1.5
+
   public var title: String
   public var turns: [Turn]
+  /// False for `--speakers none`: the turns are paragraphs and carry no `Speaker N:`.
+  public var labelled: Bool
 
-  public init(title: String, turns: [Turn]) {
+  public init(title: String, turns: [Turn], labelled: Bool = true) {
     self.title = title
     self.turns = turns
+    self.labelled = labelled
   }
 
-  /// Joins words with their speakers (as from `SpeakerAssignment.assign`) into turns.
-  public init(title: String, words: [Word], speakers: [Int]) {
+  /// Joins words with their speakers (as from `SpeakerAssignment.assign`) into turns. With
+  /// `labelled` false the speakers are ignored and paragraphs break at pauses of
+  /// `paragraphPause` or more.
+  public init(title: String, words: [Word], speakers: [Int], labelled: Bool = true) {
     precondition(words.count == speakers.count)
     var turns: [Turn] = []
-    for (word, speaker) in zip(words, speakers) {
+    for (word, speaker) in zip(words, labelled ? speakers : speakers.map { _ in 0 }) {
       let text = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !text.isEmpty else { continue }
-      if var last = turns.last, last.speaker == speaker {
+      if var last = turns.last, last.speaker == speaker,
+        labelled || word.start - last.end < Transcript.paragraphPause
+      {
         last.text += " " + text
         last.end = word.end
         turns[turns.count - 1] = last
@@ -39,19 +49,22 @@ public struct Transcript: Sendable, Equatable {
         turns.append(Turn(speaker: speaker, text: text, start: word.start, end: word.end))
       }
     }
-    self.init(title: title, turns: turns)
+    self.init(title: title, turns: turns, labelled: labelled)
   }
 
-  public var speakerCount: Int { Set(turns.map(\.speaker)).count }
+  /// Distinct speakers; 0 for an unlabelled transcript.
+  public var speakerCount: Int { labelled ? Set(turns.map(\.speaker)).count : 0 }
 
-  /// `# title`, then one `Speaker N: …` paragraph per turn. No timestamps.
+  /// `# title`, then one `Speaker N: …` paragraph per turn (plain paragraphs when unlabelled).
+  /// No timestamps.
   public var markdown: String {
     var out = "# \(Transcript.escapeHeading(title))\n"
     if turns.isEmpty {
       out += "\n_No speech found._\n"
     }
     for turn in turns {
-      out += "\nSpeaker \(turn.speaker): \(Transcript.escapeText(turn.text))\n"
+      let label = labelled ? "Speaker \(turn.speaker): " : ""
+      out += "\n\(label)\(Transcript.escapeText(turn.text))\n"
     }
     return out
   }

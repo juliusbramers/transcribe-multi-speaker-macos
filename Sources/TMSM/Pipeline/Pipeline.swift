@@ -13,11 +13,13 @@ public struct RunResult: Codable, Sendable, Equatable {
   public var speakers: Int
   public var durationSeconds: Double
   public var words: Int
+  /// Set when a joint model gave up on the file and the preset's next model ran instead.
+  public var fallback: String?
 
   public init(
     output: String?, markdown: String?, input: String, preset: String,
     transcriptionModel: String, speakerModel: String?, language: String, speakers: Int,
-    durationSeconds: Double, words: Int
+    durationSeconds: Double, words: Int, fallback: String? = nil
   ) {
     self.output = output
     self.markdown = markdown
@@ -29,6 +31,7 @@ public struct RunResult: Codable, Sendable, Equatable {
     self.speakers = speakers
     self.durationSeconds = durationSeconds
     self.words = words
+    self.fallback = fallback
   }
 
   public var json: String {
@@ -120,13 +123,39 @@ public struct Pipeline: Sendable {
     let choice = try await PresetRouting.resolve(
       preset, language: options.languageCode, audio: audio, home: home, catalogue: catalogue,
       progress: progress)
-    let asrEntry = choice.entry
+    var asrEntry = choice.entry
+    var strategy = choice.strategy
     let language = choice.language
-    guard case .transcription(let makeASR) = asrEntry.factory else {
-      throw TMSMError.unknownModel(asrEntry.id)
+    // 0 (`--speakers none`, the fast preset's default): no speaker model runs and the
+    // transcript has no labels.
+    let limit = (options.speakers ?? (preset.labelsByDefault ? .auto : .none)).limit
+
+    // A joint model (words and speakers from one decoder) runs first. If it does not get to
+    // the end of the file, the next route of the preset takes over, with a note.
+    var joint: JointResult?
+    var fallback: String?
+    if strategy == .joint, case .joint(let makeJoint) = asrEntry.factory {
+      let result = try await makeJoint(home).transcribe(
+        audio, language: language, maxSpeakers: limit, progress: progress)
+      if result.complete {
+        joint = result
+      } else {
+        let reason = "\(asrEntry.name) did not finish this recording"
+        fallback = reason
+        LanguageDetection.warn("\(reason); using the next model of the preset", progress: progress)
+        let (route, entry) = try PresetRouting.route(
+          preset, language: language ?? LanguageDetection.silence, catalogue: catalogue,
+          after: choice.route)
+        asrEntry = entry
+        strategy = route?.strategy ?? preset.strategy
+      }
+    }
+    if joint == nil, case .joint = asrEntry.factory {
+      // An unrouted joint entry (`individual`) with nothing to fall back to.
+      throw TMSMError.engine(
+        "\(asrEntry.name) did not finish this recording and no other model is configured")
     }
 
-    let limit = options.speakers.limit
     var speakerEntry: CatalogueEntry?
     var track = SpeakerTrack(segments: [])
     func labelSpeakers() async throws {
@@ -140,7 +169,29 @@ public struct Pipeline: Sendable {
 
     let words: [Word]
     let speakers: [Int]
-    if choice.strategy == .turnwise {
+    if let joint, let redecode = choice.route?.redecode {
+      // The joint model's turns, decoded again by a speech model that spells better.
+      let entry = try catalogue.entry(redecode)
+      guard case .transcription(let makeASR) = entry.factory else {
+        throw TMSMError.unknownModel(redecode)
+      }
+      asrEntry = entry
+      track = SpeakerTrack(segments: joint.segments)
+      let pieces = TurnwiseDecoding.plan(
+        segments: track.segments, sampleCount: audio.samples.count,
+        maxSpeakers: max(1, limit)
+      ) { Chunking.meanSquare(audio.samples, $0) }
+      let decoded = try await TurnwiseDecoding.decode(
+        audio, pieces: pieces, engine: makeASR(home), language: language, progress: progress)
+      words = decoded.words
+      speakers = SpeakerAssignment.renumber(decoded.speakers)
+    } else if let joint {
+      words = joint.words
+      speakers = SpeakerAssignment.renumber(SpeakerAssignment.cap(joint.speakers, limit))
+    } else if strategy == .turnwise {
+      guard case .transcription(let makeASR) = asrEntry.factory else {
+        throw TMSMError.unknownModel(asrEntry.id)
+      }
       // Speakers first, then one decode per speaker turn (see TurnwiseDecoding). With one
       // speaker there is nothing to label: the whole file is one speaker-0 turn, split at
       // quiet points like any long turn, and decoded the same way.
@@ -157,16 +208,21 @@ public struct Pipeline: Sendable {
       words = decoded.words
       speakers = SpeakerAssignment.renumber(decoded.speakers)
     } else {
+      guard case .transcription(let makeASR) = asrEntry.factory else {
+        throw TMSMError.unknownModel(asrEntry.id)
+      }
       words = try await makeASR(home).transcribe(audio, language: language, progress: progress)
       if limit > 1 && !words.isEmpty { try await labelSpeakers() }
       speakers = SpeakerAssignment.assign(
-        words: words, segments: track.segments, activity: track.activity, maxSpeakers: limit)
+        words: words, segments: SpeakerSegments.clean(track.segments), activity: track.activity,
+        maxSpeakers: limit)
     }
 
     if environment["TMSM_DEBUG"] == "1" {
       dumpDebug(name: title, preset: preset.name, words: words, track: track)
     }
-    let transcript = Transcript(title: title, words: words, speakers: speakers)
+    let transcript = Transcript(
+      title: title, words: words, speakers: speakers, labelled: limit > 0)
 
     var written: URL?
     if !options.writesStdout {
@@ -182,9 +238,11 @@ public struct Pipeline: Sendable {
     return RunResult(
       output: written?.path, markdown: options.writesStdout ? transcript.markdown : nil,
       input: options.readsStdin ? AudioInput.stdinName : input.path, preset: preset.name,
-      transcriptionModel: asrEntry.id, speakerModel: speakerEntry?.id,
+      transcriptionModel: asrEntry.id,
+      speakerModel: speakerEntry?.id ?? (joint != nil && limit > 0 ? choice.entry.id : nil),
       language: language ?? "auto", speakers: transcript.speakerCount,
-      durationSeconds: (audio.duration * 10).rounded() / 10, words: words.count)
+      durationSeconds: (audio.duration * 10).rounded() / 10, words: words.count,
+      fallback: fallback)
   }
 
   /// The heading: `--name`, else the input's file name, else `stdin`.

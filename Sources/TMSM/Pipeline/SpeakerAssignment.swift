@@ -7,13 +7,16 @@ import Foundation
 /// 2. A word goes to the speaker whose segments overlap it the longest. When several overlap it
 ///    about equally (within `nearTie` of the word's length) and the engine gives frame activity,
 ///    the most active of those wins: turn changes are often marked for both speakers at once.
+///    Callers pass segments cleaned by `SpeakerSegments`, so a listener's "mm-hm" over the one
+///    talking is no longer a segment that could take their words.
 /// 3. A word no segment touches goes to the nearest segment if that is at most `maxGap`
 ///    seconds away.
 /// 4. Anything still open takes the previous word's speaker; leading words take the first
 ///    assigned speaker.
-/// 5. A lone short word (under `islandMaxWord` s) between two words of one other speaker, with
-///    pauses of at most `islandMaxPause` s on both sides, joins them, but only when that other
-///    speaker's segments also overlap it. A short reply nobody else overlaps keeps its speaker.
+/// 5. A short run of at most `islandMaxWords` words, under `islandMaxSpan` seconds, with pauses
+///    of at most `islandMaxPause` seconds on both sides, between two runs of one other speaker
+///    joins them, but only when that other speaker's segments also overlap it. A short reply
+///    nobody else overlaps, or one set apart by a pause, keeps its speaker.
 ///
 /// Remaining ties go to the previous word's speaker if it is among them, otherwise to the lowest
 /// engine index, so the result never depends on input order.
@@ -23,8 +26,9 @@ public enum SpeakerAssignment {
   /// Words shorter than this count as this long, so zero-length words still overlap.
   static let minWordSpan = 0.02
   public static let nearTie = 0.2
-  public static let islandMaxWord = 0.35
-  public static let islandMaxPause = 0.25
+  public static let islandMaxWords = 2
+  public static let islandMaxSpan = 0.6
+  public static let islandMaxPause = 0.5
 
   public static func assign(
     words: [Word], segments: [SpeakerSegment], activity: SpeakerActivity? = nil,
@@ -73,21 +77,35 @@ public enum SpeakerAssignment {
 
     // Only leading words can still be open: after the first assignment `previous` is set.
     let firstAssigned = raw.compactMap { $0 }.first ?? 0
-    var speakers = raw.map { $0 ?? firstAssigned }
+    let speakers = raw.map { $0 ?? firstAssigned }
+    return renumber(smoothIslands(words: words, speakers: speakers, overlaps: overlaps))
+  }
 
-    // One left-to-right pass over the original labels, so results don't cascade.
-    let before = speakers
-    for i in words.indices.dropFirst().dropLast() {
-      let (a, w, b) = (words[i - 1], words[i], words[i + 1])
-      let around = before[i - 1]
-      if around == before[i + 1], before[i] != around, (overlaps[i][around] ?? 0) > 0,
-        w.end - w.start < islandMaxWord, w.start - a.end <= islandMaxPause,
-        b.start - w.end <= islandMaxPause
-      {
-        speakers[i] = around
+  /// One left-to-right pass over the original labels, so results don't cascade: a short run
+  /// of one speaker inside another speaker's flow joins that flow when the flowing speaker's
+  /// segments overlap at least one of its words.
+  static func smoothIslands(words: [Word], speakers: [Int], overlaps: [[Int: Double]]) -> [Int] {
+    var runs: [(speaker: Int, from: Int, to: Int)] = []
+    for (i, s) in speakers.enumerated() {
+      if let last = runs.last, last.speaker == s {
+        runs[runs.count - 1].to = i + 1
+      } else {
+        runs.append((s, i, i + 1))
       }
     }
-    return renumber(speakers)
+    var result = speakers
+    for k in runs.indices.dropFirst().dropLast() {
+      let run = runs[k]
+      let around = runs[k - 1].speaker
+      guard around == runs[k + 1].speaker, run.to - run.from <= islandMaxWords,
+        words[run.to - 1].end - words[run.from].start < islandMaxSpan,
+        words[run.from].start - words[run.from - 1].end <= islandMaxPause,
+        words[run.to].start - words[run.to - 1].end <= islandMaxPause,
+        (run.from..<run.to).contains(where: { (overlaps[$0][around] ?? 0) > 0 })
+      else { continue }
+      for i in run.from..<run.to { result[i] = around }
+    }
+    return result
   }
 
   /// Best key by value; exact ties go to `prefer`, then to the lowest key.
@@ -108,6 +126,24 @@ public enum SpeakerAssignment {
       total.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
         .prefix(count).map(\.key))
     return segments.filter { keep.contains($0.speaker) && $0.end > $0.start }
+  }
+
+  /// At most `count` speakers (0 keeps them all): the ones with the fewest words go, and each
+  /// of their words takes the previous word's speaker (the first kept speaker for leading ones).
+  public static func cap(_ speakers: [Int], _ count: Int) -> [Int] {
+    guard count > 0 else { return speakers }
+    var total: [Int: Int] = [:]
+    for s in speakers { total[s, default: 0] += 1 }
+    guard total.count > count else { return speakers }
+    let keep = Set(
+      total.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        .prefix(count).map(\.key))
+    let first = speakers.first { keep.contains($0) } ?? 0
+    var previous = first
+    return speakers.map { s in
+      if keep.contains(s) { previous = s }
+      return previous
+    }
   }
 
   /// Engine indices → 1, 2, … by first appearance.

@@ -85,9 +85,16 @@ public protocol TranscriptionEngine: Sendable {
   /// times relative to the segment's start.
   func transcribe(segments: [Audio], language: String?, progress: Progress) async throws
     -> [[Word]]
+
+  /// True when the words' times come from the model (Parakeet). False when they are spread
+  /// evenly over the segment (Qwen3-ASR without the aligner): then a turn is decoded without
+  /// context, since no word could be placed by its time.
+  var timesWords: Bool { get }
 }
 
 extension TranscriptionEngine {
+  public var timesWords: Bool { true }
+
   /// Default: one `transcribe` call per segment (engines that load per call should override).
   public func transcribe(segments: [Audio], language: String?, progress: Progress) async throws
     -> [[Word]]
@@ -98,6 +105,33 @@ extension TranscriptionEngine {
     }
     return result
   }
+}
+
+/// What a joint engine returns: words, each word's speaker (engine index), and whether the
+/// model got to the end of the audio. An incomplete result is not used; the pipeline falls back
+/// to the next route.
+public struct JointResult: Sendable, Equatable {
+  public var words: [Word]
+  public var speakers: [Int]
+  /// The model's own speaker segments (one per sentence or so), for decoding the words again
+  /// turn by turn with a speech model that spells better.
+  public var segments: [SpeakerSegment]
+  public var complete: Bool
+
+  public init(words: [Word], speakers: [Int], segments: [SpeakerSegment], complete: Bool) {
+    self.words = words
+    self.speakers = speakers
+    self.segments = segments
+    self.complete = complete
+  }
+}
+
+/// Speech to text and speaker labels from one model that hears the whole recording at once.
+/// Same lifecycle as `TranscriptionEngine`.
+public protocol JointEngine: Sendable {
+  /// `maxSpeakers` 0 means the labels are not needed (they are still returned).
+  func transcribe(_ audio: Audio, language: String?, maxSpeakers: Int, progress: Progress)
+    async throws -> JointResult
 }
 
 /// Speaker labelling. Same lifecycle as `TranscriptionEngine`.

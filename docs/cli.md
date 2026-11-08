@@ -4,7 +4,7 @@ How `tmsm` behaves when a script or another program calls it: what goes to stdou
 
 ## The rules
 
-- **A run never asks**, whatever the terminal. `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4), language `auto`, output to the Desktop, and the configured preset (else `default`). Models that are missing are downloaded, with progress on stderr.
+- **A run never asks**, whatever the terminal. `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4; `none` with the `fast` preset), language `auto`, output to the Desktop, and the configured preset (else `default`). Models that are missing are downloaded, with progress on stderr.
 - **stdout holds only the result**: the path of the written file, the Markdown itself with `--output -`, or one JSON object with `--json`. Everything else goes to stderr.
 - **Progress goes to stderr.** In a terminal it is one redrawn line. Without one, it is a plain line per stage (`tmsm: Transcribing`). `--quiet` turns it off.
 - **Errors**: one line, `tmsm: <message>`, on stderr. The exit code is non-zero.
@@ -35,7 +35,7 @@ tmsm recording.m4a --speakers 2 --language de --output ~/Notes/ --preset fast
 }
 ```
 
-`speakerModel` is absent when `--speakers 1` skips speaker labelling. The Markdown file has a `# <file name>` heading (or `--name`), then one `Speaker N: …` paragraph per turn, without timestamps.
+`speakerModel` is absent when `--speakers 1` or `--speakers none` skips speaker labelling; with `--speakers none`, `speakers` is `0` and the Markdown has plain paragraphs (split at pauses of 1.5 s or more) instead of `Speaker N:` turns. A `fallback` field appears when `extreme`'s joint model did not finish the file and the preset's next model ran instead. The Markdown file has a `# <file name>` heading (or `--name`), then one `Speaker N: …` paragraph per turn, without timestamps.
 
 ## Pipes
 
@@ -141,8 +141,10 @@ ARGUMENTS:
                           mp4, mov, …; - reads stdin.
 
 OPTIONS:
-  --speakers <speakers>   Number of speakers: 1-4 or auto (at most 4). (values:
-                          auto, 1, 2, 3, 4; default: auto)
+  --speakers <speakers>   Number of speakers: 1-4, auto (at most 4), or none
+                          for plain paragraphs without speaker labels (no
+                          speaker model runs). Default: auto, or none with the
+                          fast preset. (values: auto, none, 1, 2, 3, 4)
   --language <language>   Spoken language as an ISO 639-1 code (de, en, …) or
                           auto. (default: auto)
   -o, --output <output>   Output file or folder (default: the Desktop); -
@@ -193,24 +195,27 @@ OPTIONS:
 <!-- tmsm setup --list -->
 ```text
 Presets (tmsm setup --preset <name>):
-  fast        Parakeet Ultra + Nemotron-3 offline, speakers by overlap; peak RAM 0.4 GB
+  fast        Parakeet Ultra alone, plain paragraphs (--speakers auto adds Nemotron-3); peak RAM 0.4 GB
               820 MB download: parakeet-ultra, nemotron3-offline
               other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
-* default     Parakeet Ultra + Nemotron-3 offline, decoded speaker turn by speaker turn; peak RAM 0.4 GB
+* default     Parakeet Ultra + Nemotron-3 offline, speakers by overlap; peak RAM 0.4 GB
               820 MB download: parakeet-ultra, nemotron3-offline
               other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
-  accurate    Parakeet Ultra for en/de, Qwen3-ASR 1.7B 8-bit for other languages, turn by turn; peak RAM 0.4–6.2 GB
-              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
-  extreme     Currently identical to accurate: no larger pipeline measured better with v0.1.0 engines; peak RAM 0.4–6.2 GB
-              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
+  accurate    Nemotron-3 turns, each decoded by Parakeet Ultra (Qwen3-ASR for other languages); peak RAM 0.4–6.2 GB
+              820 MB download: parakeet-ultra, nemotron3-offline
+              other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
+  extreme     MOSS-Transcribe-Diarize cuts the speaker turns over the whole file, Parakeet Ultra decodes them; peak RAM 0.4–9.6 GB
+              2.1 GB download: moss-transcribe-diarize-0.9b-8bit, parakeet-ultra, nemotron3-offline
+              other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
   individual  any two models below (tmsm setup --transcription <id> --speakers <id>)
 
 Speech-to-text models:
-  parakeet-v3           Parakeet TDT 0.6B v3, 480 MB, 25 languages, CC-BY-4.0
-  parakeet-ultra        Parakeet Ultra, 630 MB, 25 languages, CC-BY-4.0
-  qwen3-asr-1.7b-8bit   Qwen3-ASR 1.7B 8-bit, 3.7 GB, 28 languages, Apache-2.0
-  qwen3-asr-1.7b-5bit   Qwen3-ASR 1.7B 5-bit, 3.7 GB, 28 languages, Apache-2.0
-  voxtral-mini-3b-8bit  Voxtral Mini 3B 8-bit, 6.9 GB, 8 languages, Apache-2.0
+  parakeet-v3                        Parakeet TDT 0.6B v3, 480 MB, 25 languages, CC-BY-4.0
+  parakeet-ultra                     Parakeet Ultra, 630 MB, 25 languages, CC-BY-4.0
+  qwen3-asr-1.7b-8bit                Qwen3-ASR 1.7B 8-bit, 3.7 GB, 28 languages, Apache-2.0
+  qwen3-asr-1.7b-5bit                Qwen3-ASR 1.7B 5-bit, 3.7 GB, 28 languages, Apache-2.0
+  voxtral-mini-3b-8bit               Voxtral Mini 3B 8-bit, 6.9 GB, 8 languages, Apache-2.0
+  moss-transcribe-diarize-0.9b-8bit  MOSS-Transcribe-Diarize 0.9B, 1.3 GB, labels speakers itself, 14 languages, Apache-2.0
 
 Speaker models:
   nemotron3-c128-split-w8a8  Nemotron-3 Diarization (c128-split-w8a8), 95 MB, OpenMDW-1.1

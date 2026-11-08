@@ -272,8 +272,10 @@ enum SetupCases {
       }
       t.expect(try ids("fast"), ["parakeet-ultra", "nemotron3-offline"])
       t.expect(try ids("default"), ["parakeet-ultra", "nemotron3-offline"])
-      t.expect(try ids("accurate"), ["parakeet-ultra", "qwen3-asr-1.7b-8bit", "nemotron3-offline"])
-      t.expect(try ids("extreme"), ["parakeet-ultra", "qwen3-asr-1.7b-8bit", "nemotron3-offline"])
+      t.expect(try ids("accurate"), ["parakeet-ultra", "nemotron3-offline"])
+      t.expect(
+        try ids("extreme"),
+        ["moss-transcribe-diarize-0.9b-8bit", "parakeet-ultra", "nemotron3-offline"])
       let fast = try Catalogue.shared.preset(named: "fast")
       t.expect(real.laterIDs(fast), ["qwen3-asr-1.7b-8bit"])
       t.expect(real.downloadMB(fast) < 1_000, "fast setup under 1 GB: \(real.downloadMB(fast)) MB")
