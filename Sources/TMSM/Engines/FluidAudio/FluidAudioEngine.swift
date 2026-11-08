@@ -24,17 +24,38 @@ public enum FluidAudioEngine {
         downloadMB: 630),
       nemotron(id: "nemotron3-c128-split-w8a8", preset: "c128-split-w8a8", downloadMB: 95),
       nemotron(id: "nemotron3-offline", preset: "offline", downloadMB: 190),
-    ],
-    presets: [
-      Preset(
-        name: "fast", transcription: "parakeet-v3", speakers: "nemotron3-c128-split-w8a8",
-        summary: "Parakeet v3 + Nemotron-3 c128-split-w8a8, ~1 GB RAM, 25 languages"),
-      Preset(
-        name: "default", transcription: "parakeet-ultra", speakers: "nemotron3-offline",
-        summary: "Parakeet Ultra + Nemotron-3 offline, ~1.5 GB RAM, 25 languages"),
     ])
 
   static func modelsRoot(_ home: TMSMHome) -> URL { home.models(engine: folder) }
+
+  /// Every model repo pinned to one immutable commit, so every installation runs the same
+  /// files. FluidAudio downloads from that commit and marks the folder with it; a folder whose
+  /// mark matches and whose files are complete is used without the network. (FluidAudio checks
+  /// sizes and Core ML bundle completeness, not hashes.)
+  static let revisions: [String: String] = [
+    Repo.parakeetV3.remotePath: "7dd20fe6b1797d35f5e3307e8b1732d9a178edfe",
+    Repo.parakeetUltra.remotePath: "95eaa59a39d4394f047a4dc5cce480388a60d1b6",
+    Repo.nemotron3Diarization.remotePath: "25a90f97f254428d4b30374b76af9c74fdee8327",
+  ]
+
+  /// Nemotron-3's loader accepts any cache with the right weights version, whatever commit it
+  /// came from, so its files live in a folder named after the pinned commit: a cache from any
+  /// other commit is never picked up.
+  static func nemotronRoot(_ home: TMSMHome) -> URL {
+    let revision = revisions[Repo.nemotron3Diarization.remotePath] ?? "main"
+    return modelsRoot(home).appendingPathComponent("nemotron-\(revision.prefix(12))")
+  }
+
+  /// FluidAudio rejects audio shorter than 0.3 s; shorter input is padded with silence to 1 s.
+  static func padded(_ samples: [Float]) -> [Float] {
+    samples.count >= Audio.sampleRate
+      ? samples : samples + [Float](repeating: 0, count: Audio.sampleRate - samples.count)
+  }
+
+  /// Applies `revisions` to FluidAudio's registry. Call before any FluidAudio download.
+  static func pinRevisions() {
+    ModelRegistry.revisionOverrides.merge(revisions) { _, pinned in pinned }
+  }
 
   static func parakeet(
     id: String, name: String, version: AsrModelVersion, repo: Repo, downloadMB: Int
@@ -57,7 +78,7 @@ public enum FluidAudioEngine {
         // The repo folder holds every Nemotron-3 preset; setup removes one bundle at a time.
         guard let config = Nemotron3Config.preset(named: preset) else { return [] }
         return [
-          modelsRoot(home).appendingPathComponent(Repo.nemotron3Diarization.folderName)
+          nemotronRoot(home).appendingPathComponent(Repo.nemotron3Diarization.folderName)
             .appendingPathComponent(config.hubSubdirectory)
             .appendingPathComponent(config.modelFileName)
         ]
@@ -91,6 +112,7 @@ struct ParakeetTranscriber: TranscriptionEngine {
 
   func transcribe(_ audio: Audio, language: String?, progress: Progress) async throws -> [Word] {
     progress.activity("Loading \(name)")
+    FluidAudioEngine.pinRevisions()
     let directory = FluidAudioEngine.modelsRoot(home).appendingPathComponent(repo.folderName)
     let models = try await AsrModels.downloadAndLoad(
       to: directory, version: version,
@@ -116,7 +138,8 @@ struct ParakeetTranscriber: TranscriptionEngine {
     let result: ASRResult
     do {
       result = try await manager.transcribe(
-        audio.samples, decoderState: &state, language: language.flatMap(Language.init(rawValue:)))
+        FluidAudioEngine.padded(audio.samples), decoderState: &state,
+        language: language.flatMap(Language.init(rawValue:)))
     } catch {
       watcher?.cancel()
       await watcher?.value
@@ -133,6 +156,40 @@ struct ParakeetTranscriber: TranscriptionEngine {
       Word($0.word, $0.startTime, $0.endTime)
     }
   }
+
+  /// Many segments with one model load (speaker turns).
+  func transcribe(segments: [Audio], language: String?, progress: Progress) async throws
+    -> [[Word]]
+  {
+    progress.activity("Loading \(name)")
+    FluidAudioEngine.pinRevisions()
+    let directory = FluidAudioEngine.modelsRoot(home).appendingPathComponent(repo.folderName)
+    let models = try await AsrModels.downloadAndLoad(
+      to: directory, version: version,
+      progressHandler: FluidAudioEngine.downloadHandler(name, progress))
+    let manager = AsrManager(config: .default, models: models)
+    progress.stage("Transcribing turns")
+    var result: [[Word]] = []
+    do {
+      for (i, segment) in segments.enumerated() {
+        try Task.checkCancellation()
+        var state = TdtDecoderState.make()
+        let decoded = try await manager.transcribe(
+          FluidAudioEngine.padded(segment.samples), decoderState: &state,
+          language: language.flatMap(Language.init(rawValue:)))
+        result.append(
+          buildWordTimings(from: decoded.tokenTimings ?? []).map {
+            Word($0.word, $0.startTime, $0.endTime)
+          })
+        progress.update(Double(i + 1) / Double(max(1, segments.count)))
+      }
+    } catch {
+      await manager.cleanup()
+      throw error
+    }
+    await manager.cleanup()
+    return result
+  }
 }
 
 struct NemotronLabeller: SpeakerEngine {
@@ -145,11 +202,12 @@ struct NemotronLabeller: SpeakerEngine {
     }
     let name = "Nemotron-3 (\(preset))"
     progress.activity("Loading \(name)")
+    FluidAudioEngine.pinRevisions()
     // The offline profile is GPU-only (it exceeds the ANE compiler's limits); the split
     // w8a8 profiles are built for the ANE.
     let units: MLComputeUnits = config.splitGraph ? .all : .cpuAndGPU
     let models = try await Nemotron3Models.loadFromHuggingFace(
-      config: config, cacheDirectory: FluidAudioEngine.modelsRoot(home), computeUnits: units,
+      config: config, cacheDirectory: FluidAudioEngine.nemotronRoot(home), computeUnits: units,
       progressHandler: FluidAudioEngine.downloadHandler(name, progress))
 
     // The streaming path is frame-exact with `processComplete` but keeps only a window of audio

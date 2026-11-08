@@ -21,6 +21,9 @@ public struct CatalogueEntry: Sendable {
   public var factory: Factory
   /// Where the model lives on disk, for setup's "delete models no longer needed".
   public var storage: @Sendable (TMSMHome) -> [URL]
+  /// Downloads everything the entry needs, without running it. Default: one run on 1 s of
+  /// silence (which downloads as a side effect); engines that can download directly override it.
+  public var prepare: @Sendable (TMSMHome, Progress) async throws -> Void
 
   public var kind: Kind {
     switch factory {
@@ -32,7 +35,8 @@ public struct CatalogueEntry: Sendable {
   public init(
     id: String, name: String, engine: String, languages: [String], downloadMB: Int,
     license: String, gated: Bool, factory: Factory,
-    storage: @escaping @Sendable (TMSMHome) -> [URL]
+    storage: @escaping @Sendable (TMSMHome) -> [URL],
+    prepare: (@Sendable (TMSMHome, Progress) async throws -> Void)? = nil
   ) {
     self.id = id
     self.name = name
@@ -43,21 +47,7 @@ public struct CatalogueEntry: Sendable {
     self.gated = gated
     self.factory = factory
     self.storage = storage
-  }
-}
-
-/// A named pair of catalogue entries.
-public struct Preset: Sendable, Equatable {
-  public var name: String
-  public var transcription: String
-  public var speakers: String
-  public var summary: String
-
-  public init(name: String, transcription: String, speakers: String, summary: String) {
-    self.name = name
-    self.transcription = transcription
-    self.speakers = speakers
-    self.summary = summary
+    self.prepare = prepare ?? { home, progress in try await factory.runOnSilence(home, progress) }
   }
 }
 
@@ -65,27 +55,28 @@ public struct Preset: Sendable, Equatable {
 public struct EngineRegistration: Sendable {
   public var engine: String
   public var entries: [CatalogueEntry]
-  public var presets: [Preset]
 
-  public init(engine: String, entries: [CatalogueEntry], presets: [Preset]) {
+  public init(engine: String, entries: [CatalogueEntry]) {
     self.engine = engine
     self.entries = entries
-    self.presets = presets
   }
 }
 
 public struct Catalogue: Sendable {
   public static let defaultPreset = "default"
-  /// Every engine tmsm ships. Session B appends the MLX registration here.
-  public static let registrations: [EngineRegistration] = [FluidAudioEngine.registration]
+  /// Every engine tmsm ships.
+  public static let registrations: [EngineRegistration] = [
+    FluidAudioEngine.registration, MLXEngine.registration,
+  ]
   public static let shared = Catalogue(registrations)
 
   public let entries: [CatalogueEntry]
   public let presets: [Preset]
 
-  public init(_ registrations: [EngineRegistration]) {
+  /// Presets come from the preset table (`Presets.all`), entries from the engines.
+  public init(_ registrations: [EngineRegistration], presets: [Preset] = Presets.all) {
     entries = registrations.flatMap(\.entries)
-    presets = registrations.flatMap(\.presets)
+    self.presets = presets
   }
 
   public var presetNames: [String] { presets.map(\.name) }
@@ -102,5 +93,18 @@ public struct Catalogue: Sendable {
       throw TMSMError.unknownModel(id)
     }
     return entry
+  }
+}
+
+extension CatalogueEntry.Factory {
+  /// One run on 1 s of silence: loads (and so downloads) the model.
+  func runOnSilence(_ home: TMSMHome, _ progress: Progress) async throws {
+    let silence = Audio(samples: [Float](repeating: 0, count: Audio.sampleRate))
+    switch self {
+    case .transcription(let make):
+      _ = try await make(home).transcribe(silence, language: nil, progress: progress)
+    case .speakers(let make):
+      _ = try await make(home).label(silence, maxSpeakers: 4, progress: progress)
+    }
   }
 }

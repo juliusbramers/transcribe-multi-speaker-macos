@@ -80,6 +80,24 @@ public struct Audio: Sendable {
 public protocol TranscriptionEngine: Sendable {
   /// `language` is an ISO 639-1 code, or nil for automatic.
   func transcribe(_ audio: Audio, language: String?, progress: Progress) async throws -> [Word]
+
+  /// Independent segments (e.g. speaker turns) with one model load: words per segment, with
+  /// times relative to the segment's start.
+  func transcribe(segments: [Audio], language: String?, progress: Progress) async throws
+    -> [[Word]]
+}
+
+extension TranscriptionEngine {
+  /// Default: one `transcribe` call per segment (engines that load per call should override).
+  public func transcribe(segments: [Audio], language: String?, progress: Progress) async throws
+    -> [[Word]]
+  {
+    var result: [[Word]] = []
+    for segment in segments {
+      result.append(try await transcribe(segment, language: language, progress: progress))
+    }
+    return result
+  }
 }
 
 /// Speaker labelling. Same lifecycle as `TranscriptionEngine`.
