@@ -446,8 +446,11 @@ enum CoreCases {
     }
 
     t.test("home: system leftovers are exactly the two tmsm-named folders") {
-      let paths = SystemPaths.leftovers(environment: ["HOME": "/Users/u"]).map(\.path)
+      let paths = SystemPaths.leftovers(accountHome: URL(fileURLWithPath: "/Users/u")).map(\.path)
       t.expect(paths, ["/Users/u/Library/Caches/tmsm", "/Users/u/Library/HTTPStorages/tmsm"])
+      t.expect(
+        SystemPaths.accountHome.path, NSHomeDirectoryForUser(NSUserName()) ?? "",
+        "account home from the user database")
     }
 
     t.test("catalogue: fast and default are token-free FluidAudio presets") {
