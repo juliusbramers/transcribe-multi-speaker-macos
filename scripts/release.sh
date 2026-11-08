@@ -69,8 +69,9 @@ step "macOS 15 gate: every shipped Mach-O"
 # found through @executable_path/@loader_path, no rpath into this Mac's developer tools.
 fail() { echo "gate: $*" >&2; exit 1; }
 stage="$dist/$name"
-machos="$(find "$stage" -type f -perm -u+x -o -type f -name '*.dylib' | while IFS= read -r f; do
-  file -b "$f" | grep -q Mach-O && printf '%s\n' "$f"; done)"
+machos="$(find "$stage" -type f | while IFS= read -r f; do
+  if file -b "$f" | grep -q Mach-O; then printf '%s\n' "$f"; fi
+done)"
 [ -n "$machos" ] || fail "no Mach-O found"
 printf '%s\n' "$machos" | while IFS= read -r f; do
   short="${f#"$stage"/}"
