@@ -1,11 +1,11 @@
 #!/bin/sh
-# Rewrites the "## Reference" section of docs/agents.md from the built binary: the exact output of
+# Rewrites the "## Reference" section of docs/cli.md from the built binary: the exact output of
 # each command below, run with an empty TMSM_HOME. selftest (SetupCases) fails when they differ.
 #   swift build && scripts/docs-reference.sh
 set -eu
 cd "$(dirname "$0")/.."
 bin="${1:-.build/debug/tmsm}"
-doc=docs/agents.md
+doc=docs/cli.md
 empty="$(mktemp -d)"
 trap 'rm -rf "$empty"' EXIT
 head="$(sed '/^## Reference$/,$d' "$doc")"

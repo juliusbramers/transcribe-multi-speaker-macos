@@ -1,6 +1,6 @@
-# tmsm for agents
+# Command-line reference and scripting
 
-`tmsm` is built to be called from scripts and agents. This page is the contract. The reference at the end quotes `tmsm --help`, and `scripts/check.sh` fails when that quote and the binary differ.
+How `tmsm` behaves when a script or another program calls it: what goes to stdout and stderr, the `--json` result, exit codes, and setup without questions. The reference at the end quotes the program's own `--help`, and `scripts/check.sh` fails when the quote and the binary differ.
 
 ## The rules
 
@@ -142,7 +142,7 @@ OVERVIEW: Choose the preset or individual models, download them, delete unused
 ones.
 
 Without options it asks in the terminal; with options it asks nothing (for
-agents). A gated model needs a Hugging Face token: typed in hidden and kept in
+scripts). A gated model needs a Hugging Face token: typed in hidden and kept in
 the Keychain, or passed as HF_TOKEN.
 
 USAGE: tmsm setup [--preset <name>] [--transcription <id>] [--speakers <id>] [--delete-unused] [--keep-unused] [--list]

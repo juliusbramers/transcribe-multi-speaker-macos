@@ -2,8 +2,8 @@ import Darwin
 import Foundation
 import Security
 
-/// The Hugging Face token for gated models: `HF_TOKEN` first (agents), else the Keychain item
-/// that `tmsm setup` stores (service "tmsm"). The token never goes to disk or into the config.
+/// The Hugging Face token for gated models: `HF_TOKEN` first (scripts, agents), else the
+/// Keychain item that `tmsm setup` stores (service "tmsm"). It never goes to disk or the config.
 public enum Credentials {
   public static let service = "tmsm"
   public static let account = "huggingface"

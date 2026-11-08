@@ -60,7 +60,8 @@ public final class TerminalConsole: Console {
     guard readpassphrase(prompt, &buffer, buffer.count, RPP_REQUIRE_TTY) != nil else {
       return nil
     }
-    defer { buffer.withUnsafeMutableBytes { $0.initializeMemory(as: UInt8.self, repeating: 0) } }
-    return String(cString: buffer)
+    defer { for i in buffer.indices { buffer[i] = 0 } }  // the token does not linger
+    let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+    return String(decoding: bytes, as: UTF8.self)
   }
 }

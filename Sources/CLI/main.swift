@@ -64,7 +64,7 @@ struct Setup: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     abstract: "Choose the preset or individual models, download them, delete unused ones.",
     discussion: """
-      Without options it asks in the terminal; with options it asks nothing (for agents). \
+      Without options it asks in the terminal; with options it asks nothing (for scripts). \
       A gated model needs a Hugging Face token: typed in hidden and kept in the Keychain, \
       or passed as HF_TOKEN.
       """)

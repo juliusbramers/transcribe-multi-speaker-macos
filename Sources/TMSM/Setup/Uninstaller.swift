@@ -79,5 +79,21 @@ public struct Uninstaller {
     let foreign = names.filter { !Uninstaller.homeItems.contains($0) }
     guard foreign.isEmpty else { throw SetupError.foreignFiles(url.path, foreign.sorted()) }
     try FileManager.default.removeItem(at: url)
+    removeEmptyDefaultParents(of: url)
+  }
+
+  /// When the home was the default `~/Library/Application Support/tmsm` and tmsm created those
+  /// parents (a fresh account, or a temp-HOME test), they go too, but only while empty.
+  func removeEmptyDefaultParents(of url: URL) {
+    let fm = FileManager.default
+    let user = installer.userHome.standardizedFileURL
+    let library = user.appendingPathComponent("Library", isDirectory: true)
+    let support = library.appendingPathComponent("Application Support", isDirectory: true)
+    guard url.deletingLastPathComponent().standardizedFileURL.path == support.path else { return }
+    for folder in [support, library] {
+      let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? ["?"]
+      guard names.filter({ $0 != ".DS_Store" }).isEmpty else { return }
+      try? fm.removeItem(at: folder)
+    }
   }
 }

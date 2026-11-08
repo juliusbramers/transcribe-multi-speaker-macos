@@ -1,6 +1,6 @@
 # tmsm
 
-`tmsm` turns any audio file into a Markdown transcript with speaker labels (Speaker 1–4). It runs locally on Apple silicon. After a one-time model download, nothing leaves your Mac. It is built to be called by agents as well as by people: see [docs/agents.md](docs/agents.md).
+`tmsm` turns any audio file into a Markdown transcript with speaker labels (Speaker 1–4). It runs locally on Apple silicon. After a one-time model download, nothing leaves your Mac. Scripts and agents can call it as easily as people can.
 
 ## Install
 
@@ -61,9 +61,9 @@ tmsm reads m4a, mp3, WhatsApp ogg/opus, wav, flac, and the audio in mp4/mov. Opu
 
 `tmsm setup` asks once for the quality you want. `--preset` overrides that choice for one run. `tmsm setup --list` shows each preset's models, RAM and download size, read from the program itself. `individual` lets you pick any speech-to-text model and any speaker model from the catalogue. A gated model asks once for a Hugging Face token, which is typed in hidden and kept in your Keychain.
 
-## For agents
+## Command-line reference and scripting
 
-[docs/agents.md](docs/agents.md) is the full contract: stdout and stderr, exit codes, `--json`, environment variables, and non-interactive setup.
+[docs/cli.md](docs/cli.md) covers stdout and stderr, exit codes, the `--json` result, environment variables such as `HF_TOKEN`, setup without questions, and the full `--help` of every command.
 
 ## Development
 
@@ -91,7 +91,7 @@ During development, set `TMSM_HOME` to a scratch folder so models and caches sta
 - `Sources/selftest/` depends on the library target and runs every test case (`CoreCases`, `SetupCases`, …).
 - A failing case prints its name and the mismatch; any failure exits non-zero.
 - Run it with `swift run selftest`; `scripts/check.sh` runs it after `swift build`.
-- `SetupCases` also checks that the `tmsm` output quoted in `docs/agents.md` matches the binary, and that the README and docs name no flag the program lacks.
+- `SetupCases` also checks that the `tmsm` output quoted in `docs/cli.md` matches the binary (`scripts/docs-reference.sh` regenerates it), and that the README and docs name no flag the program lacks.
 
 ## Credits
 

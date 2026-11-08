@@ -451,6 +451,31 @@ enum SetupCases {
       }
       t.expect(read(other), "keep")
       t.expect(read(userHome.appendingPathComponent(".zprofile")), "export A=1\n")
+      t.expect(exists(userHome.appendingPathComponent("Library/Caches")), true, "not empty")
+    }
+
+    t.test("uninstall: empty parents of the default home go only while empty") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let installer = Installer(environment: ["HOME": dir.path])
+      let support = dir.appendingPathComponent("Library/Application Support")
+      let home = TMSMHome(root: support.appendingPathComponent("tmsm"))
+      try write("{}", home.configFile)
+      let uninstaller = Uninstaller(home: home, installer: installer, leftovers: [])
+      t.expect(uninstaller.run([.home(home.root)]).count, 0)
+      t.expect(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
+
+      try write("{}", home.configFile)
+      try write("x", support.appendingPathComponent("Other App/data"))
+      t.expect(uninstaller.run([.home(home.root)]).count, 0)
+      t.expect(read(support.appendingPathComponent("Other App/data")), "x")
+
+      let custom = TMSMHome(root: dir.appendingPathComponent("a/b/tmsm"))
+      try write("{}", custom.configFile)
+      t.expect(
+        Uninstaller(home: custom, installer: installer, leftovers: []).run([.home(custom.root)])
+          .count, 0)
+      t.expect(exists(dir.appendingPathComponent("a/b")), true, "a custom home's parents stay")
     }
 
     t.test("uninstall: a TMSM_HOME holding other files is left alone, the rest still goes") {
@@ -568,7 +593,7 @@ enum SetupCases {
   }
 
   static func docs(_ t: Runner) {
-    t.test("docs: quoted tmsm output in docs/agents.md and README.md matches the binary") {
+    t.test("docs: quoted tmsm output in docs/cli.md and README.md matches the binary") {
       guard let binary else {
         t.fail("no tmsm beside selftest; run `swift build` first")
         return
@@ -581,7 +606,7 @@ enum SetupCases {
         helpText += try Updater.run(binary.path, args, in: nil)
       }
       var quotes = 0
-      for doc in ["docs/agents.md", "README.md"] {
+      for doc in ["docs/cli.md", "README.md"] {
         guard let text = read(repo.appendingPathComponent(doc)) else {
           t.fail("\(doc) is missing")
           continue
@@ -609,9 +634,9 @@ enum SetupCases {
         t.expect(unknown.isEmpty, "\(doc) names flags tmsm doesn't have: \(unknown.sorted())")
       }
       t.expect(quotes >= 7, "the docs quote every --help and setup --list (found \(quotes))")
-      let documented = flags(read(repo.appendingPathComponent("docs/agents.md")) ?? "")
+      let documented = flags(read(repo.appendingPathComponent("docs/cli.md")) ?? "")
       let missing = flags(helpText).subtracting(documented).subtracting(["--help"])
-      t.expect(missing.isEmpty, "docs/agents.md misses flags: \(missing.sorted())")
+      t.expect(missing.isEmpty, "docs/cli.md misses flags: \(missing.sorted())")
     }
   }
 }
