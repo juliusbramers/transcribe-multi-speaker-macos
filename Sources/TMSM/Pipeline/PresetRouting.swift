@@ -55,44 +55,52 @@ public enum PresetRouting {
     _ preset: Preset, language: String?, audio: Audio, home: TMSMHome, catalogue: Catalogue,
     progress: Progress
   ) async throws -> Choice {
+    let candidates = languages(preset, catalogue: catalogue)
     guard let routing = preset.routing else {
       let entry = try catalogue.entry(preset.transcription)
-      if let language { _ = try route(preset, language: language, catalogue: catalogue) }
-      return Choice(entry: entry, strategy: preset.strategy, language: language)
+      var code = language
+      if let language {
+        _ = try route(preset, language: language, catalogue: catalogue)
+      } else if !entry.languages.isEmpty {
+        code = try await detect(
+          audio, detectors: [entry.id], candidates: candidates, home: home,
+          catalogue: catalogue, progress: progress)
+      }
+      return Choice(entry: entry, strategy: preset.strategy, language: code)
     }
-    var chosen = language
-    if chosen == nil {
-      chosen = try await detect(
-        audio, detectors: routing.detectors, home: home, catalogue: catalogue,
-        progress: progress)
+    var code = language ?? ""
+    if language == nil {
+      code = try await detect(
+        audio, detectors: routing.detectors, candidates: candidates, home: home,
+        catalogue: catalogue, progress: progress)
     }
-    let code = chosen ?? LanguageDetection.fallback
     let (route, entry) = try self.route(preset, language: code, catalogue: catalogue)
     if let note = route?.note { LanguageDetection.warn(note, progress: progress) }
     return Choice(entry: entry, strategy: route?.strategy ?? preset.strategy, language: code)
   }
 
-  /// Each detector transcribes up to a minute of speech until one is sure of the language;
-  /// when none is, the fallback language is used and a note says so.
+  /// Each detector transcribes up to a minute of speech, unconditioned, and the language is read
+  /// from its text among every language the preset covers. A detector's answer counts only if
+  /// it can transcribe that language itself (its text is unreliable otherwise) or it is the last
+  /// one. With no speech, or no detector sure, the fallback language is used (with a note when
+  /// something was heard).
   static func detect(
-    _ audio: Audio, detectors: [String], home: TMSMHome, catalogue: Catalogue,
-    progress: Progress
+    _ audio: Audio, detectors: [String], candidates: [String], home: TMSMHome,
+    catalogue: Catalogue, progress: Progress
   ) async throws -> String {
-    let sample = speechSample(audio)
+    guard let sample = speechSample(audio) else { return LanguageDetection.fallback }
     var heard = false
-    for id in detectors {
+    for (i, id) in detectors.enumerated() {
       let entry = try catalogue.entry(id)
       guard case .transcription(let make) = entry.factory else { continue }
       progress.activity("Detecting the language")
-      // The segments call: text only, no word timing needed.
       let words = try await make(home).transcribe(
         segments: [sample], language: nil, progress: progress
       ).flatMap { $0 }
       heard = heard || !words.isEmpty
       let text = words.map(\.text).joined(separator: " ")
-      if let found = LanguageDetection.detect(text, among: entry.languages) {
-        return found.code
-      }
+      guard let found = LanguageDetection.detect(text, among: candidates) else { continue }
+      if entry.languages.contains(found.code) || i == detectors.count - 1 { return found.code }
     }
     if heard {
       LanguageDetection.warn(
@@ -102,8 +110,9 @@ public enum PresetRouting {
     return LanguageDetection.fallback
   }
 
-  /// Up to `detectionWindows` windows that hold speech, about `detectionSeconds` in total.
-  static func speechSample(_ audio: Audio) -> Audio {
+  /// Up to `detectionWindows` windows that hold speech, about `detectionSeconds` in total,
+  /// padded to at least one second; nil when the file has no speech.
+  static func speechSample(_ audio: Audio) -> Audio? {
     var samples: [Float] = []
     var taken = 0
     for range in Chunking.plan(audio.samples) where !Chunking.isSilent(audio.samples, range) {
@@ -115,6 +124,10 @@ public enum PresetRouting {
         break
       }
     }
-    return Audio(samples: samples.isEmpty ? audio.samples : samples)
+    guard !samples.isEmpty else { return nil }
+    if samples.count < Audio.sampleRate {
+      samples += [Float](repeating: 0, count: Audio.sampleRate - samples.count)
+    }
+    return Audio(samples: samples)
   }
 }

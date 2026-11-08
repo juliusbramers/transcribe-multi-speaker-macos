@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// One file of a pinned model: its path in the repo, exact size and SHA-256.
@@ -39,6 +40,13 @@ enum PinnedDownload {
     if isComplete(dir, revision: revision, files: files) { return }
     let fm = FileManager.default
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    // One process at a time per model: others wait here, then find the bundle complete.
+    let lock = try lockFile(for: dir)
+    defer {
+      flock(lock, LOCK_UN)
+      close(lock)
+    }
+    if isComplete(dir, revision: revision, files: files) { return }
     // The marker goes first, so an interrupted download never looks complete.
     try? fm.removeItem(at: dir.appendingPathComponent(markerName))
 
@@ -69,7 +77,24 @@ enum PinnedDownload {
       done += file.size
       progress(done, total)
     }
-    try Data((revision + "\n").utf8).write(to: dir.appendingPathComponent(markerName))
+    try Data((revision + "\n").utf8).write(
+      to: dir.appendingPathComponent(markerName), options: .atomic)
+  }
+
+  /// An exclusive lock on `<parent>/.<name>.lock`, held until closed. Blocks while another
+  /// process holds it.
+  static func lockFile(for dir: URL) throws -> Int32 {
+    let path = dir.deletingLastPathComponent()
+      .appendingPathComponent(".\(dir.lastPathComponent).lock").path
+    let fd = open(path, O_RDWR | O_CREAT, 0o644)
+    guard fd >= 0 else { throw TMSMError.engine("Can't lock \(path)") }
+    while flock(fd, LOCK_EX) != 0 {
+      guard errno == EINTR else {
+        close(fd)
+        throw TMSMError.engine("Can't lock \(path)")
+      }
+    }
+    return fd
   }
 
   /// One file from `/resolve/<revision>/`, into the temp folder (which tmsm points into its

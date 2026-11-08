@@ -24,7 +24,9 @@ enum LanguageDetection {
     var best: (code: String, p: Double)?
     for (language, p) in recognizer.languageHypotheses(withMaximum: candidates.count) {
       let code = language.rawValue.split(separator: "-").first.map(String.init) ?? ""
-      guard candidates.contains(code), p > (best?.p ?? 0) else { continue }
+      guard candidates.contains(code) else { continue }
+      // Higher probability wins; equal ones go to the lower code, whatever the order.
+      if let b = best, p < b.p || (p == b.p && code >= b.code) { continue }
       best = (code, p)
     }
     guard let best, best.p >= minimumConfidence else { return nil }

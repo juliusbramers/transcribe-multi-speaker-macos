@@ -74,28 +74,10 @@ struct MLXTranscriber: TranscriptionEngine {
       WindowPadding.padded(segments[piece.segment].samples[piece.range])
     }
 
-    // Qwen3 left to detect the language itself emits the wrong script on some turns, so the
-    // language is fixed once per file and passed to every window.
-    var used = language
-    if used == nil {
-      progress.activity("Detecting the language")
-      var text = ""
-      var seconds = 0.0
-      for (piece, isSpeech) in zip(pieces, speech) where isSpeech {
-        text += " " + (try model(samples(piece), nil))
-        seconds += Double(piece.range.count) / Double(Audio.sampleRate)
-        if seconds >= LanguageDetection.sampleSeconds { break }
-        if text.split(whereSeparator: \.isWhitespace).count >= 400 { break }
-      }
-      let detected = LanguageDetection.detect(text, among: spec.languages)
-      used = detected?.code ?? LanguageDetection.fallback
-      if detected == nil, !text.trimmingCharacters(in: .whitespaces).isEmpty {
-        LanguageDetection.warn(
-          "language unclear, transcribing as \(LanguageDetection.fallback);"
-            + " pass --language to set it", progress: progress)
-      }
-    }
-
+    // The language comes from the caller: the pipeline fixes it once per file (Qwen3 left to
+    // detect it per window emits the wrong script on some). nil decodes unconditioned, which is
+    // what language detection itself wants.
+    let used = language
     progress.stage("Transcribing")
     var texts: [String] = []
     for (i, piece) in pieces.enumerated() {

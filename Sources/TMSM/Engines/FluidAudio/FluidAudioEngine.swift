@@ -38,6 +38,20 @@ public enum FluidAudioEngine {
     Repo.nemotron3Diarization.remotePath: "25a90f97f254428d4b30374b76af9c74fdee8327",
   ]
 
+  /// Nemotron-3's loader accepts any cache with the right weights version, whatever commit it
+  /// came from, so its files live in a folder named after the pinned commit: a cache from any
+  /// other commit is never picked up.
+  static func nemotronRoot(_ home: TMSMHome) -> URL {
+    let revision = revisions[Repo.nemotron3Diarization.remotePath] ?? "main"
+    return modelsRoot(home).appendingPathComponent("nemotron-\(revision.prefix(12))")
+  }
+
+  /// FluidAudio rejects audio shorter than 0.3 s; shorter input is padded with silence to 1 s.
+  static func padded(_ samples: [Float]) -> [Float] {
+    samples.count >= Audio.sampleRate
+      ? samples : samples + [Float](repeating: 0, count: Audio.sampleRate - samples.count)
+  }
+
   /// Applies `revisions` to FluidAudio's registry. Call before any FluidAudio download.
   static func pinRevisions() {
     ModelRegistry.revisionOverrides.merge(revisions) { _, pinned in pinned }
@@ -64,7 +78,7 @@ public enum FluidAudioEngine {
         // The repo folder holds every Nemotron-3 preset; setup removes one bundle at a time.
         guard let config = Nemotron3Config.preset(named: preset) else { return [] }
         return [
-          modelsRoot(home).appendingPathComponent(Repo.nemotron3Diarization.folderName)
+          nemotronRoot(home).appendingPathComponent(Repo.nemotron3Diarization.folderName)
             .appendingPathComponent(config.hubSubdirectory)
             .appendingPathComponent(config.modelFileName)
         ]
@@ -124,7 +138,8 @@ struct ParakeetTranscriber: TranscriptionEngine {
     let result: ASRResult
     do {
       result = try await manager.transcribe(
-        audio.samples, decoderState: &state, language: language.flatMap(Language.init(rawValue:)))
+        FluidAudioEngine.padded(audio.samples), decoderState: &state,
+        language: language.flatMap(Language.init(rawValue:)))
     } catch {
       watcher?.cancel()
       await watcher?.value
@@ -160,7 +175,7 @@ struct ParakeetTranscriber: TranscriptionEngine {
         try Task.checkCancellation()
         var state = TdtDecoderState.make()
         let decoded = try await manager.transcribe(
-          segment.samples, decoderState: &state,
+          FluidAudioEngine.padded(segment.samples), decoderState: &state,
           language: language.flatMap(Language.init(rawValue:)))
         result.append(
           buildWordTimings(from: decoded.tokenTimings ?? []).map {
@@ -192,7 +207,7 @@ struct NemotronLabeller: SpeakerEngine {
     // w8a8 profiles are built for the ANE.
     let units: MLComputeUnits = config.splitGraph ? .all : .cpuAndGPU
     let models = try await Nemotron3Models.loadFromHuggingFace(
-      config: config, cacheDirectory: FluidAudioEngine.modelsRoot(home), computeUnits: units,
+      config: config, cacheDirectory: FluidAudioEngine.nemotronRoot(home), computeUnits: units,
       progressHandler: FluidAudioEngine.downloadHandler(name, progress))
 
     // The streaming path is frame-exact with `processComplete` but keeps only a window of audio

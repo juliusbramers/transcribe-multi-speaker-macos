@@ -338,6 +338,16 @@ enum MLXCases {
     }
   }
 
+  /// A stand-in speech engine that always "hears" the same text.
+  struct FixedText: TranscriptionEngine {
+    let text: String
+    func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress) async throws
+      -> [Word]
+    {
+      text.split(separator: " ").map { Word(String($0), 0, 0.1) }
+    }
+  }
+
   static func turnwise(_ t: Runner) {
     let sr = Audio.sampleRate
     let flat: (Range<Int>) -> Double = { _ in 1 }
@@ -413,10 +423,46 @@ enum MLXCases {
       let sr = Audio.sampleRate
       var samples = [Float](repeating: 0, count: 120 * sr)
       for i in (30 * sr)..<(120 * sr) { samples[i] = i % 2 == 0 ? 0.1 : -0.1 }
-      let sample = PresetRouting.speechSample(Audio(samples: samples))
+      let sample = PresetRouting.speechSample(Audio(samples: samples))!
       t.expect(
         sample.samples.filter { $0 == 0 }.count < 11 * sr, "the silent first window is left out")
       t.expect(sample.samples.count >= 50 * sr && sample.samples.count <= 75 * sr, "≈ a minute")
+      t.expect(
+        PresetRouting.speechSample(Audio(samples: [Float](repeating: 0, count: 5 * sr))) == nil,
+        "a silent file has no sample")
+      let blip = PresetRouting.speechSample(Audio(samples: [Float](repeating: 0.1, count: 3200)))
+      t.expect(blip?.samples.count, sr, "a 0.2 s file is padded to 1 s")
+    }
+
+    t.test("routing: a detector's answer outside its own languages escalates; the last decides") {
+      let german = "Das ist ein ganz normaler deutscher Satz über das Wetter und die Arbeit heute."
+      func entry(_ id: String, _ languages: [String]) -> CatalogueEntry {
+        CatalogueEntry(
+          id: id, name: id, engine: "test", languages: languages, downloadMB: 0, license: "",
+          gated: false, factory: .transcription { _ in FixedText(text: german) },
+          storage: { _ in [] })
+      }
+      let cat = Catalogue(
+        [
+          EngineRegistration(
+            engine: "test", entries: [entry("en-only", ["en"]), entry("both", ["de", "en"])])
+        ],
+        presets: [])
+      let audio = Audio(samples: [Float](repeating: 0.1, count: 2 * Audio.sampleRate))
+      let home = TMSMHome(root: FileManager.default.temporaryDirectory)
+      let done = DispatchSemaphore(value: 0)
+      let results = Mutex<[String]>([])
+      Task {
+        for detectors in [["en-only", "both"], ["en-only"]] {
+          let code = try? await PresetRouting.detect(
+            audio, detectors: detectors, candidates: ["de", "en", "hr"], home: home,
+            catalogue: cat, progress: .silent)
+          results.withLock { $0.append(code ?? "error") }
+        }
+        done.signal()
+      }
+      done.wait()
+      t.expect(results.withLock { $0 }, ["de", "de"])
     }
   }
 }
