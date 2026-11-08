@@ -36,6 +36,7 @@ final class Runner {
 let runner = Runner()
 CoreCases.run(runner)
 MLXCases.run(runner)
+SetupCases.run(runner)
 
 if runner.failures.isEmpty {
   print("selftest: \(runner.checks) checks passed")

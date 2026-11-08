@@ -52,7 +52,10 @@ public struct RunOptions: ParsableArguments, Sendable {
     help: "Output file or folder (default: the Desktop). Existing files are never overwritten.")
   public var output: String?
 
-  @Option(help: "Preset for this run: fast or default (default: the configured preset).")
+  @Option(
+    help: ArgumentHelp(
+      "Preset for this run: \((Catalogue.shared.presetNames + [Config.individual]).joined(separator: ", ")) (default: the configured preset)."
+    ))
   public var preset: String?
 
   @Flag(help: "Print the result as JSON on stdout instead of the output path.")

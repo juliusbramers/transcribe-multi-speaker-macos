@@ -48,8 +48,7 @@ public struct Pipeline: Sendable {
 
   /// `--preset`, else the configured one, else `default`.
   public func resolvePreset(_ options: RunOptions) throws -> Preset {
-    let configured = try Config.load(from: home.configFile).preset
-    return try catalogue.preset(named: options.preset ?? configured ?? Catalogue.defaultPreset)
+    try Config.load(from: home.configFile).resolvePreset(options.preset, catalogue: catalogue)
   }
 
   public func run(_ options: RunOptions, progress: Progress) async throws -> RunResult {
@@ -61,6 +60,11 @@ public struct Pipeline: Sendable {
     // An unsupported --language fails before any decoding.
     if let language = options.languageCode {
       _ = try PresetRouting.route(preset, language: language, catalogue: catalogue)
+    }
+    // A gated model needs a Hugging Face token: HF_TOKEN, else the one `tmsm setup` stored.
+    let gated = try [asrEntry, catalogue.entry(preset.speakers)].filter(\.gated)
+    if let first = gated.first {
+      try Credentials.exportToken(for: first.name, environment: environment)
     }
 
     progress.activity("Decoding audio")

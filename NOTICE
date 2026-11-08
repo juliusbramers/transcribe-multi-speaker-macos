@@ -1,0 +1,22 @@
+tmsm — transcribe multi-speaker audio on macOS
+
+tmsm downloads its models from Hugging Face on first use; none is bundled in the release.
+Each model keeps its own licence. Credits:
+
+Speech to text
+- Parakeet TDT 0.6B v3: NVIDIA (nvidia/parakeet-tdt-0.6b-v3), CC-BY-4.0.
+  Core ML conversion: FluidInference (FluidInference/parakeet-tdt-0.6b-v3-coreml), CC-BY-4.0.
+- Parakeet Ultra: Moondream (moondream/parakeet-ultra), CC-BY-4.0.
+  Core ML conversion: FluidInference (FluidInference/parakeet-ultra-coreml), CC-BY-4.0.
+
+Speaker labelling
+- Nemotron-3 Diarization: NVIDIA (nvidia/Nemotron-3-Diarization), OpenMDW-1.1.
+  Core ML conversion: FluidInference (FluidInference/nemotron-3-diarization-coreml), OpenMDW-1.1.
+
+Software built into the tmsm executable
+- FluidAudio 0.18.2, FluidInference, Apache-2.0: https://github.com/FluidInference/FluidAudio
+- Swift Argument Parser, Apple Inc., Apache-2.0: https://github.com/apple/swift-argument-parser
+
+CC-BY-4.0: https://creativecommons.org/licenses/by/4.0/
+OpenMDW-1.1: see https://huggingface.co/nvidia/Nemotron-3-Diarization
+Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0
