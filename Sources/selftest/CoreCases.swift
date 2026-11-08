@@ -10,6 +10,32 @@ enum CoreCases {
     naming(t)
     progress(t)
     homeAndCatalogue(t)
+    decoding(t)
+  }
+
+  // MARK: Decoding
+
+  static func decoding(_ t: Runner) {
+    t.test("decode: a read that stops early counts as truncated") {
+      t.expect(AudioDecoder.isTruncated(decoded: 160_000, expected: 160_400), false, "tail slack")
+      t.expect(AudioDecoder.isTruncated(decoded: 16_000, expected: 160_000), true, "stopped at 1 s")
+      t.expect(AudioDecoder.isTruncated(decoded: 170_000, expected: 160_000), false, "longer")
+    }
+
+    t.test("decode: ffmpeg is found on PATH only") {
+      t.expect(AudioDecoder.findExecutable("sh", path: "/nonexistent:/bin")?.path, "/bin/sh")
+      t.expect(AudioDecoder.findExecutable("sh", path: nil), nil)
+      t.expect(AudioDecoder.findExecutable("sh", path: "::"), nil)
+    }
+
+    t.test("decode: a missing file is reported as missing") {
+      do {
+        _ = try AudioDecoder.decode(URL(fileURLWithPath: "/nonexistent/memo.opus"))
+        t.fail("expected an error")
+      } catch let error as TMSMError {
+        t.expect(error, .inputNotFound("/nonexistent/memo.opus"))
+      }
+    }
   }
 
   // MARK: Assignment
@@ -111,14 +137,38 @@ enum CoreCases {
     }
 
     t.test("assign: a lone short word inside another speaker's flow joins it") {
+      // The flowing speaker's segment still covers "dann"; a 0.2 s burst of speaker 1 too.
       let words = [
         Word("nur", 0.0, 0.3), Word("dann", 0.35, 0.5), Word("sonst", 0.55, 0.9),
       ]
       let segs = [
-        SpeakerSegment(0, 0.0, 0.32), SpeakerSegment(1, 0.33, 0.52),
+        SpeakerSegment(0, 0.0, 0.38), SpeakerSegment(1, 0.33, 0.52),
         SpeakerSegment(0, 0.53, 1.0),
       ]
       t.expect(SpeakerAssignment.assign(words: words, segments: segs, maxSpeakers: 4), [1, 1, 1])
+    }
+
+    t.test("assign: a short reply nobody else overlaps keeps its speaker") {
+      let words = [Word("so", 0.0, 0.3), Word("Ja", 0.4, 0.6), Word("und", 0.7, 1.0)]
+      let segs = [
+        SpeakerSegment(0, 0.0, 0.32), SpeakerSegment(1, 0.38, 0.62),
+        SpeakerSegment(0, 0.68, 1.0),
+      ]
+      t.expect(SpeakerAssignment.assign(words: words, segments: segs, maxSpeakers: 4), [1, 2, 1])
+    }
+
+    t.test("assign: overlap duration beats louder activity on a clear winner") {
+      // Speaker 0 covers the whole word, speaker 1 a third of it but much louder.
+      let words = [Word("a", 0.0, 0.3)]
+      let segs = [SpeakerSegment(0, 0.0, 0.3), SpeakerSegment(1, 0.2, 0.3)]
+      var values = [Float](repeating: 0, count: 30 * 2)
+      for f in 0..<30 { values[f * 2] = 0.3 }
+      for f in 20..<30 { values[f * 2 + 1] = 1.0 }
+      let act = SpeakerActivity(frameSeconds: 0.01, speakers: 2, values: values)
+      let two = words + [Word("b", 0.25, 0.3)]
+      let r = SpeakerAssignment.assign(words: two, segments: segs, activity: act, maxSpeakers: 4)
+      t.expect(r[0], 1, "overlap winner")
+      t.expect(r, [1, 2], "the near-tie on b goes by activity")
     }
 
     t.test("assign: a real backchannel keeps its speaker") {
@@ -327,6 +377,26 @@ enum CoreCases {
         out.all, ["tmsm: Decoding audio\n", "tmsm: Transcribing\n", "tmsm: Labelling speakers\n"])
     }
 
+    t.test("progress: repeated stage + update callbacks keep advancing") {
+      let out = Lines()
+      let clock = Mutex(0.0)
+      let p = Progress(mode: .bar, sink: out.sink, clock: { clock.withLock { $0 } })
+      for i in 1...5 {
+        clock.withLock { $0 += 0.5 }
+        p.stage("Downloading")
+        p.update(Double(i) / 5)
+      }
+      p.finish()
+      let percents = out.all.compactMap { line -> Int? in
+        guard let r = line.range(of: #"\d+%"#, options: .regularExpression) else { return nil }
+        return Int(line[r].dropLast())
+      }
+      t.expect(percents.first, 0, "starts at 0")
+      t.expect(percents.contains(60), true, "advances")
+      t.expect(percents.last, 100, "reaches 100")
+      t.expect(percents.filter { $0 == 0 }.count, 1, "0% only once")
+    }
+
     t.test("progress: quiet prints nothing") {
       let out = Lines()
       let p = Progress(mode: .quiet, sink: out.sink)
@@ -393,6 +463,25 @@ enum CoreCases {
       t.expect(try cat.preset(named: "fast").speakers, "nemotron3-c128-split-w8a8")
       t.expect(try cat.preset(named: "default").speakers, "nemotron3-offline")
       t.expect(Set(cat.entries.map(\.id)).count, cat.entries.count, "unique ids")
+    }
+
+    t.test("home: each run has its own temp folder and removes only that") {
+      let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tmsm-selftest-\(UUID().uuidString)")
+      defer { try? FileManager.default.removeItem(at: root) }
+      let home = TMSMHome(root: root)
+      let saved = ProcessInfo.processInfo.environment["TMPDIR"]
+      defer { if let saved { setenv("TMPDIR", saved, 1) } }
+      let a = try home.activate(runID: "a")
+      let b = try home.activate(runID: "b")
+      try Data("x".utf8).write(to: b.appendingPathComponent("partial"))
+      home.removeRunTemporary(a)
+      t.expect(FileManager.default.fileExists(atPath: a.path), false, "own folder removed")
+      t.expect(
+        FileManager.default.fileExists(atPath: b.appendingPathComponent("partial").path), true,
+        "the other run's files stay")
+      home.removeRunTemporary(root)
+      t.expect(FileManager.default.fileExists(atPath: root.path), true, "refuses non-run folders")
     }
 
     t.test("config: missing file means no choice; round trip") {

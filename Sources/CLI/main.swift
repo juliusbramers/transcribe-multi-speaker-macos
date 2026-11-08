@@ -25,9 +25,10 @@ struct Transcribe: AsyncParsableCommand {
   func run() async throws {
     let home = TMSMHome.resolve()
     let progress = Progress(mode: Progress.mode(quiet: options.quiet))
-    defer { home.cleanTemporary() }
+    var runTemp: URL?
+    defer { if let runTemp { home.removeRunTemporary(runTemp) } }
     do {
-      try home.activate()
+      runTemp = try home.activate()
       let result = try await Pipeline(home: home).run(options, progress: progress)
       progress.finish()
       print(options.json ? result.json : result.output)

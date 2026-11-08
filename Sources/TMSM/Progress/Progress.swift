@@ -92,7 +92,9 @@ public final class Progress: Sendable {
       }
       if isNew { sink("tmsm: \(name)\n") }
     case .bar:
-      let line = state.withLock { s in
+      let line: String? = state.withLock { s in
+        // Repeating the current stage (download callbacks do) keeps its bar and clock.
+        if s.stage == name && (s.fraction == nil) == (fraction == nil) { return nil }
         if s.stage != name { s.stageStart = now }
         s.stage = name
         s.fraction = fraction
@@ -100,6 +102,7 @@ public final class Progress: Sendable {
         s.drawn = true
         return Progress.render(s, now: now)
       }
+      guard let line else { return }
       sink("\r\u{1B}[2K" + line)
       if fraction == nil { startTicker() } else { stopTicker() }
     }

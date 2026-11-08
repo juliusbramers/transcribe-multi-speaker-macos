@@ -97,17 +97,36 @@ struct ParakeetTranscriber: TranscriptionEngine {
       progressHandler: FluidAudioEngine.downloadHandler(name, progress))
     let manager = AsrManager(config: .default, models: models)
 
-    progress.stage("Transcribing")
-    let stream = await manager.transcriptionProgressStream
-    let watcher = Task {
-      for try await fraction in stream { progress.update(fraction) }
+    // FluidAudio reports progress only for audio longer than one model window (~15 s).
+    let measurable = audio.samples.count > ASRConstants.maxModelSamples
+    var watcher: Task<Void, Never>?
+    if measurable {
+      progress.stage("Transcribing")
+      let stream = await manager.transcriptionProgressStream
+      watcher = Task {
+        do {
+          for try await fraction in stream { progress.update(fraction) }
+        } catch {}
+      }
+    } else {
+      progress.activity("Transcribing")
     }
-    defer { watcher.cancel() }
 
     var state = TdtDecoderState.make()
-    let result = try await manager.transcribe(
-      audio.samples, decoderState: &state, language: language.flatMap(Language.init(rawValue:)))
-    progress.update(1)
+    let result: ASRResult
+    do {
+      result = try await manager.transcribe(
+        audio.samples, decoderState: &state, language: language.flatMap(Language.init(rawValue:)))
+    } catch {
+      watcher?.cancel()
+      await watcher?.value
+      await manager.cleanup()
+      throw error
+    }
+    // The stream ends with the session; wait so no late update lands in the next stage.
+    watcher?.cancel()
+    await watcher?.value
+    if measurable { progress.update(1) }
     await manager.cleanup()
 
     return buildWordTimings(from: result.tokenTimings ?? []).map {
@@ -133,15 +152,35 @@ struct NemotronLabeller: SpeakerEngine {
       config: config, cacheDirectory: FluidAudioEngine.modelsRoot(home), computeUnits: units,
       progressHandler: FluidAudioEngine.downloadHandler(name, progress))
 
-    progress.activity("Labelling speakers")
+    // The streaming path is frame-exact with `processComplete` but keeps only a window of audio
+    // and mel features, so long recordings don't need a second full copy. It also gives a bar.
+    progress.stage("Labelling speakers")
     let diarizer = Nemotron3Diarizer(config: config, models: models)
-    let (probabilities, frames) = try diarizer.processComplete(audio.samples)
+    let step = Audio.sampleRate * 30
+    var probabilities: [Float] = []
+    probabilities.reserveCapacity(
+      (audio.samples.count / 160 + 1) * config.numSpeakers)
+    var fed = 0
+    while fed < audio.samples.count {
+      let next = min(fed + step, audio.samples.count)
+      diarizer.appendAudio(Array(audio.samples[fed..<next]))
+      for chunk in try diarizer.processBufferedAudio() {
+        probabilities.append(contentsOf: chunk.probabilities)
+      }
+      fed = next
+      progress.update(Double(fed) / Double(audio.samples.count))
+      await Task.yield()
+    }
+    for chunk in try diarizer.finishStream() {
+      probabilities.append(contentsOf: chunk.probabilities)
+    }
+    let frames = probabilities.count / config.numSpeakers
     let segments = Nemotron3Diarizer.segments(
       probabilities: probabilities, frameCount: frames, numSpeakers: config.numSpeakers
     ).map { SpeakerSegment($0.speakerIndex, Double($0.startSeconds), Double($0.endSeconds)) }
     let activity = SpeakerActivity(
       frameSeconds: Double(config.outputFrameSeconds), speakers: config.numSpeakers,
-      values: Array(probabilities.prefix(frames * config.numSpeakers)))
+      values: probabilities)
     return SpeakerTrack(segments: segments, activity: activity)
   }
 }

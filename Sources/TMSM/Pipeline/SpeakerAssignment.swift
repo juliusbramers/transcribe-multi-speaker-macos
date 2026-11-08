@@ -4,26 +4,25 @@ import Foundation
 ///
 /// 1. Speakers beyond `maxSpeakers` are dropped: the ones with the least total speech go first
 ///    (ties: the higher engine index goes).
-/// 2. A word goes to the speaker whose segments overlap it the longest. With frame activity,
-///    the speakers whose segments overlap the word are the candidates and the one with the most
-///    activity over the word wins; overlapping speech at turn changes is common, and the
-///    activity tells the stronger voice apart where binary overlap ties.
+/// 2. A word goes to the speaker whose segments overlap it the longest. When several overlap it
+///    about equally (within `nearTie` of the word's length) and the engine gives frame activity,
+///    the most active of those wins: turn changes are often marked for both speakers at once.
 /// 3. A word no segment touches goes to the nearest segment if that is at most `maxGap`
 ///    seconds away.
 /// 4. Anything still open takes the previous word's speaker; leading words take the first
 ///    assigned speaker.
 /// 5. A lone short word (under `islandMaxWord` s) between two words of one other speaker, with
-///    pauses of at most `islandMaxPause` s on both sides, joins them. The diarizer often marks a
-///    brief untranscribed "mhm" there, and the word it lands on belongs to the flowing sentence.
-///    Longer words such as a real "Genau." keep their speaker.
+///    pauses of at most `islandMaxPause` s on both sides, joins them, but only when that other
+///    speaker's segments also overlap it. A short reply nobody else overlaps keeps its speaker.
 ///
-/// Ties in steps 2 and 3 go to the previous word's speaker if it is among them, otherwise to
-/// the lowest engine index, so the result never depends on input order.
+/// Remaining ties go to the previous word's speaker if it is among them, otherwise to the lowest
+/// engine index, so the result never depends on input order.
 /// The returned speakers are numbered 1, 2, … in order of first appearance.
 public enum SpeakerAssignment {
   public static let defaultMaxGap = 1.0
   /// Words shorter than this count as this long, so zero-length words still overlap.
   static let minWordSpan = 0.02
+  public static let nearTie = 0.2
   public static let islandMaxWord = 0.35
   public static let islandMaxPause = 0.25
 
@@ -34,6 +33,7 @@ public enum SpeakerAssignment {
     guard !words.isEmpty else { return [] }
     let kept = keepLongest(segments, max(1, maxSpeakers))
     var raw = [Int?](repeating: nil, count: words.count)
+    var overlaps = [[Int: Double]](repeating: [:], count: words.count)
     var previous: Int?
 
     for (i, word) in words.enumerated() {
@@ -45,10 +45,17 @@ public enum SpeakerAssignment {
         let o = min(end, seg.end) - max(start, seg.start)
         if o > 0 { overlap[seg.speaker, default: 0] += o }
       }
-      if let activity, overlap.count > 1 {
-        for s in overlap.keys { overlap[s] = activity.mass(s, start, end) }
+      overlaps[i] = overlap
+
+      var scores = overlap
+      if let activity, let best = overlap.values.max() {
+        let close = overlap.filter { best - $0.value <= nearTie * (end - start) }
+        if close.count > 1 {
+          scores = close.mapValues { _ in 0 }
+          for s in close.keys { scores[s] = activity.mass(s, start, end) }
+        }
       }
-      var choice = pick(overlap, prefer: previous, larger: true)
+      var choice = pick(scores, prefer: previous, larger: true)
 
       if choice == nil {
         var distance: [Int: Double] = [:]
@@ -72,11 +79,12 @@ public enum SpeakerAssignment {
     let before = speakers
     for i in words.indices.dropFirst().dropLast() {
       let (a, w, b) = (words[i - 1], words[i], words[i + 1])
-      if before[i - 1] == before[i + 1], before[i] != before[i - 1],
+      let around = before[i - 1]
+      if around == before[i + 1], before[i] != around, (overlaps[i][around] ?? 0) > 0,
         w.end - w.start < islandMaxWord, w.start - a.end <= islandMaxPause,
         b.start - w.end <= islandMaxPause
       {
-        speakers[i] = before[i - 1]
+        speakers[i] = around
       }
     }
     return renumber(speakers)

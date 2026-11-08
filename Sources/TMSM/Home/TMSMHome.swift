@@ -42,15 +42,20 @@ public struct TMSMHome: Sendable, Equatable {
 
   /// Points every process-wide cache we know of into the root. Call before any engine runs.
   ///
-  /// - `TMPDIR` (FluidAudio's partial downloads and disk-backed audio use the temp folder)
+  /// - `TMPDIR` → a folder of this run's own under `cache/tmp` (FluidAudio's partial downloads
+  ///   and disk-backed audio use the temp folder), so parallel runs never share one
   /// - `HF_HOME` / `HF_HUB_CACHE` for Hugging Face clients
   /// - the shared `URLCache` (download sessions use the default configuration)
-  public func activate() throws {
+  ///
+  /// Returns this run's temp folder; pass it to `removeRunTemporary(_:)` at the end.
+  @discardableResult
+  public func activate(runID: String = UUID().uuidString) throws -> URL {
     let fm = FileManager.default
-    for dir in [models, temporary, urlCache, huggingFace] {
+    let runTemp = temporary.appendingPathComponent("run-\(runID)", isDirectory: true)
+    for dir in [models, runTemp, urlCache, huggingFace] {
       try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     }
-    setenv("TMPDIR", temporary.path + "/", 1)
+    setenv("TMPDIR", runTemp.path + "/", 1)
     setenv("HF_HOME", huggingFace.path, 1)
     setenv("HF_HUB_CACHE", huggingFace.appendingPathComponent("hub").path, 1)
     URLCache.shared = URLCache(
@@ -58,13 +63,27 @@ public struct TMSMHome: Sendable, Equatable {
     // stderr belongs to our progress line; FluidAudio's own errors still reach us as throws.
     AppLogger.mirrorsToConsole = false
     AppLogger.minimumLevel = .error
+    removeStaleTemporary()
+    return runTemp
   }
 
-  /// Removes what the temp folder still holds from this run.
-  public func cleanTemporary() {
-    let fm = FileManager.default
-    guard let items = try? fm.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)
+  /// Removes this run's temp folder, and nothing else.
+  public func removeRunTemporary(_ runTemp: URL) {
+    guard runTemp.deletingLastPathComponent().standardizedFileURL == temporary.standardizedFileURL
     else { return }
-    for item in items { try? fm.removeItem(at: item) }
+    try? FileManager.default.removeItem(at: runTemp)
+  }
+
+  /// Run folders a crashed run left behind, untouched for a day, are removed.
+  func removeStaleTemporary(olderThan age: TimeInterval = 86_400, now: Date = Date()) {
+    let fm = FileManager.default
+    let items =
+      (try? fm.contentsOfDirectory(
+        at: temporary, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+    for item in items where item.lastPathComponent.hasPrefix("run-") {
+      let modified = try? item.resourceValues(forKeys: [.contentModificationDateKey])
+        .contentModificationDate
+      if let modified, now.timeIntervalSince(modified) > age { try? fm.removeItem(at: item) }
+    }
   }
 }

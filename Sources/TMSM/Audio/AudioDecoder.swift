@@ -1,3 +1,4 @@
+@preconcurrency import AVFoundation
 import Dispatch
 import FluidAudio
 import Foundation
@@ -19,8 +20,18 @@ public enum AudioDecoder {
     do {
       let samples = try AudioConverter(sampleRate: Double(Audio.sampleRate))
         .resampleAudioFile(url)
-      if !samples.isEmpty { return Audio(samples: samples) }
-      avError = TMSMError.emptyAudio(url.path)
+      let expected = try expectedSamples(url)
+      if samples.isEmpty {
+        avError = TMSMError.emptyAudio(url.path)
+      } else if isTruncated(decoded: samples.count, expected: expected) {
+        // FluidAudio's reader treats any read error after the first chunk as the end of the file
+        // (to tolerate MP3/AAC length estimates). A damaged file must not become half a transcript.
+        avError = TMSMError.undecodableAudio(
+          url.path,
+          "AVFoundation stopped at \(seconds(samples.count)) of \(seconds(expected))")
+      } else {
+        return Audio(samples: samples)
+      }
     } catch {
       avError = error
     }
@@ -62,6 +73,24 @@ public enum AudioDecoder {
         url.path, "ffmpeg: " + message.trimmingCharacters(in: .whitespacesAndNewlines))
     }
     return data.withUnsafeBytes { raw in Array(raw.bindMemory(to: Float.self)) }
+  }
+
+  /// Samples at 16 kHz that AVFoundation's length estimate promises.
+  static func expectedSamples(_ url: URL) throws -> Int {
+    let file = try AVAudioFile(forReading: url)
+    let rate = file.processingFormat.sampleRate
+    guard rate > 0 else { return 0 }
+    return Int((Double(file.length) * Double(Audio.sampleRate) / rate).rounded(.down))
+  }
+
+  /// Length estimates of packetized formats overshoot by a few hundred frames; one second of
+  /// slack separates that from a read that stopped early.
+  public static func isTruncated(decoded: Int, expected: Int) -> Bool {
+    decoded + Audio.sampleRate < expected
+  }
+
+  static func seconds(_ samples: Int) -> String {
+    String(format: "%.1f s", Double(samples) / Double(Audio.sampleRate))
   }
 
   /// First executable `name` in a PATH string.
