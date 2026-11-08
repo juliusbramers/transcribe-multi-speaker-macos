@@ -24,14 +24,6 @@ public enum FluidAudioEngine {
         downloadMB: 630),
       nemotron(id: "nemotron3-c128-split-w8a8", preset: "c128-split-w8a8", downloadMB: 95),
       nemotron(id: "nemotron3-offline", preset: "offline", downloadMB: 190),
-    ],
-    presets: [
-      Preset(
-        name: "fast", transcription: "parakeet-v3", speakers: "nemotron3-c128-split-w8a8",
-        summary: "Parakeet v3 + Nemotron-3 c128-split-w8a8, ~1 GB RAM, 25 languages"),
-      Preset(
-        name: "default", transcription: "parakeet-ultra", speakers: "nemotron3-offline",
-        summary: "Parakeet Ultra + Nemotron-3 offline, ~1.5 GB RAM, 25 languages"),
     ])
 
   static func modelsRoot(_ home: TMSMHome) -> URL { home.models(engine: folder) }

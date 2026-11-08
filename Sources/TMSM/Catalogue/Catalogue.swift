@@ -46,31 +46,14 @@ public struct CatalogueEntry: Sendable {
   }
 }
 
-/// A named pair of catalogue entries.
-public struct Preset: Sendable, Equatable {
-  public var name: String
-  public var transcription: String
-  public var speakers: String
-  public var summary: String
-
-  public init(name: String, transcription: String, speakers: String, summary: String) {
-    self.name = name
-    self.transcription = transcription
-    self.speakers = speakers
-    self.summary = summary
-  }
-}
-
 /// What one engine contributes. Each engine folder under `Engines/` provides one.
 public struct EngineRegistration: Sendable {
   public var engine: String
   public var entries: [CatalogueEntry]
-  public var presets: [Preset]
 
-  public init(engine: String, entries: [CatalogueEntry], presets: [Preset]) {
+  public init(engine: String, entries: [CatalogueEntry]) {
     self.engine = engine
     self.entries = entries
-    self.presets = presets
   }
 }
 
@@ -83,9 +66,10 @@ public struct Catalogue: Sendable {
   public let entries: [CatalogueEntry]
   public let presets: [Preset]
 
-  public init(_ registrations: [EngineRegistration]) {
+  /// Presets come from the preset table (`Presets.all`), entries from the engines.
+  public init(_ registrations: [EngineRegistration], presets: [Preset] = Presets.all) {
     entries = registrations.flatMap(\.entries)
-    presets = registrations.flatMap(\.presets)
+    self.presets = presets
   }
 
   public var presetNames: [String] { presets.map(\.name) }
