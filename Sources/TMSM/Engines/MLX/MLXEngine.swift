@@ -2,7 +2,7 @@ import AudioCommon
 import Darwin
 import Foundation
 
-/// MLX models run through speech-swift: Qwen3-ASR and Cohere Transcribe for speech, the Qwen3
+/// MLX models run through speech-swift: Qwen3-ASR and Voxtral Mini for speech, the Qwen3
 /// forced aligner for word timings. Everything lives under `<TMSM_HOME>/models/mlx/`.
 ///
 /// Which preset uses which entry is decided in `Presets`, not here.
@@ -14,10 +14,8 @@ public enum MLXEngine {
     "ar", "cs", "da", "de", "el", "en", "es", "fa", "fi", "fr", "hi", "hu", "id", "it", "ja",
     "ko", "mk", "ms", "nl", "pl", "pt", "ro", "ru", "sv", "th", "tr", "vi", "zh",
   ]
-  /// Cohere Transcribe's 14 languages.
-  public static let cohereLanguages = [
-    "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
-  ]
+  /// Voxtral Mini's 8 languages.
+  public static let voxtralLanguages = ["de", "en", "es", "fr", "hi", "it", "nl", "pt"]
 
   /// The forced aligner every MLX entry uses for word timings.
   public static let aligner = MLXModel(
@@ -26,7 +24,7 @@ public enum MLXEngine {
 
   /// Files besides config.json and the weights that each loader reads.
   static let qwen3Files = ["vocab.json", "merges.txt", "tokenizer_config.json"]
-  static let cohereFiles = ["tokenizer.model", "tokenizer_config.json"]
+  static let voxtralFiles = ["tekken.json", "preprocessor_config.json"]
 
   static let qwen3Bit8 = MLXTranscriberSpec(
     id: "qwen3-asr-1.7b-8bit", kind: .qwen3,
@@ -38,14 +36,14 @@ public enum MLXEngine {
     model: MLXModel(
       repo: "aufklarer/Qwen3-ASR-1.7B-MLX-5bit", name: "Qwen3-ASR 1.7B 5-bit", files: qwen3Files),
     languages: qwen3Languages, downloadMB: 2332 + 1222, license: "Apache-2.0")
-  static let cohereFP16 = MLXTranscriberSpec(
-    id: "cohere-transcribe-2b-fp16", kind: .cohere,
+  static let voxtralBit8 = MLXTranscriberSpec(
+    id: "voxtral-mini-3b-8bit", kind: .voxtral,
     model: MLXModel(
-      repo: "aufklarer/Cohere-Transcribe-2B-MLX-FP16", name: "Cohere Transcribe 2B fp16",
-      files: cohereFiles),
-    languages: cohereLanguages, downloadMB: 3942 + 1222, license: "Apache-2.0")
+      repo: "aufklarer/Voxtral-Mini-3B-2507-MLX-8bit", name: "Voxtral Mini 3B 8-bit",
+      files: voxtralFiles),
+    languages: voxtralLanguages, downloadMB: 5581 + 1222, license: "Apache-2.0")
 
-  static let transcribers = [qwen3Bit8, qwen3Bit5, cohereFP16]
+  static let transcribers = [qwen3Bit8, qwen3Bit5, voxtralBit8]
 
   public static let registration = EngineRegistration(
     engine: folder, entries: transcribers.map(\.entry) + [router])
@@ -160,7 +158,7 @@ public struct MLXModel: Sendable, Equatable {
 
 /// A speech-to-text entry: which model, and how speech-swift runs it.
 struct MLXTranscriberSpec: Sendable {
-  enum Kind: Sendable { case qwen3, cohere }
+  enum Kind: Sendable { case qwen3, voxtral }
 
   var id: String
   var kind: Kind

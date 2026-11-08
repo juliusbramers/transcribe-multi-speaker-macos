@@ -9,7 +9,8 @@ public struct Preset: Sendable, Equatable {
   public var speakers: String
   /// One line for the wizard and `--help`, without the RAM figure (that is `ramGB`).
   public var summary: String
-  /// Measured peak memory of a whole run, in GB; nil until measured.
+  /// Measured peak memory footprint of a whole run (short clip to 30 min), in GB; nil until
+  /// measured.
   public var ramGB: ClosedRange<Double>?
   /// Per-language choice of transcription entry, for presets that route.
   public var routing: LanguageRouting?
@@ -67,13 +68,13 @@ public enum Presets {
   public static let accurate = Preset(
     name: "accurate", transcription: "qwen3-asr-1.7b-8bit", speakers: "nemotron3-offline",
     summary: "Qwen3-ASR 1.7B 8-bit + Qwen3 aligner + Nemotron-3 offline, 30 languages",
-    ramGB: nil)
+    ramGB: 3.4...5.6)
 
   /// Routing is a stub until the bake-off settles it: everything goes to the fallback.
   public static let extreme = Preset(
     name: "extreme", transcription: extremeRouter, speakers: "nemotron3-offline",
     summary: "Best measured model per language + Qwen3 aligner + Nemotron-3 offline",
-    ramGB: nil,
+    ramGB: 5.5...5.7,
     routing: LanguageRouting(byLanguage: [:], fallback: "qwen3-asr-1.7b-8bit"))
 
   public static let all: [Preset] = [fast, `default`, accurate, extreme]

@@ -1,6 +1,6 @@
 #!/bin/sh
 # The one local check (there is no hosted CI): secrets, formatting, build, tests.
-# Needs only the Command Line Tools, no Xcode.
+# Needs the Command Line Tools and the Metal toolchain (for mlx.metallib); no Xcode project.
 #   scripts/check.sh         run everything
 #   scripts/check.sh --fix   format Swift sources in place first
 set -eu
@@ -30,6 +30,10 @@ git ls-files -z -- '*.swift' | xargs -0 -r swift format lint --strict
 
 step "swift build"
 swift build
+
+# MLX's GPU kernels: swift build compiles no Metal sources.
+step "mlx.metallib"
+scripts/build-metallib.sh debug
 
 # Tests are an executable target, not `swift test`: XCTest and Swift Testing need
 # full Xcode, and this repo builds with the Command Line Tools alone.

@@ -1,10 +1,10 @@
 import AudioCommon
-import CohereTranscribeASR
 import Foundation
 import MLX
 import Qwen3ASR
+import VoxtralASR
 
-/// Speech to text on MLX: windows → text (Qwen3-ASR or Cohere) → word timings (Qwen3 aligner).
+/// Speech to text on MLX: windows → text (Qwen3-ASR or Voxtral) → word timings (Qwen3 aligner).
 ///
 /// The speech model and the aligner are loaded one after the other, never together, so a run's
 /// peak memory is the larger of the two, not their sum.
@@ -63,21 +63,19 @@ struct MLXTranscriber: TranscriptionEngine {
         try await Qwen3ASRModel.fromPretrained(
           modelId: spec.model.repo, cacheDir: dir, offlineMode: true)
       }
-      let options = Qwen3DecodingOptions(language: language.flatMap(LanguageDetection.name))
+      // Greedy: the same audio always gives the same text.
+      let options = Qwen3DecodingOptions(
+        language: language.flatMap(LanguageDetection.name), temperature: 0)
       return { samples in
         try model.transcribeThrowing(audio: samples, sampleRate: Audio.sampleRate, options: options)
       }
-    case .cohere:
-      guard let language else {
-        throw TMSMError.engine("\(spec.model.name) needs a language: pass --language")
-      }
+    case .voxtral:
       let model = try await MLXEngine.load(spec.model, home, progress) { dir in
-        try await CohereTranscribeModel.fromPretrained(
-          spec.model.repo, cacheDir: dir, offlineMode: true)
+        try await VoxtralModel.fromPretrained(spec.model.repo, cacheDir: dir, offlineMode: true)
       }
-      // Longer than any window, so Cohere decodes each window in one piece.
-      let options = CohereTranscribeDecodingOptions(
-        language: language, chunkDuration: Chunking.targetSeconds + 5)
+      // Greedy (Voxtral only decodes by argmax). Its default of 128 tokens can cut off a
+      // fast-spoken 25 s window.
+      let options = VoxtralDecodingOptions(maxTokens: 448, language: language)
       return { samples in
         model.transcribe(audio: samples, sampleRate: Audio.sampleRate, options: options)
       }
