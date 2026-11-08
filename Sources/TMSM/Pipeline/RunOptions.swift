@@ -38,7 +38,7 @@ public enum SpeakerCount: Equatable, Sendable, ExpressibleByArgument, CustomStri
 
 /// The flags of a transcription run. A run never asks anything: missing flags use defaults.
 public struct RunOptions: ParsableArguments, Sendable {
-  @Argument(help: "Audio or video file: m4a, mp3, ogg/opus, wav, flac, mp4, mov, …")
+  @Argument(help: "Audio or video file: m4a, mp3, ogg/opus, wav, flac, mp4, mov, …; - reads stdin.")
   public var file: String
 
   @Option(help: "Number of speakers: 1-4 or auto (at most 4).")
@@ -49,8 +49,16 @@ public struct RunOptions: ParsableArguments, Sendable {
 
   @Option(
     name: [.short, .long],
-    help: "Output file or folder (default: the Desktop). Existing files are never overwritten.")
+    help:
+      "Output file or folder (default: the Desktop); - writes the Markdown to stdout. Existing files are never overwritten."
+  )
   public var output: String?
+
+  @Option(
+    help: ArgumentHelp(
+      "Name for the heading and the output file (default: the input's file name; stdin for -).",
+      valueName: "name"))
+  public var name: String?
 
   @Option(
     help: ArgumentHelp(
@@ -65,6 +73,9 @@ public struct RunOptions: ParsableArguments, Sendable {
   public var quiet = false
 
   public init() {}
+
+  public var readsStdin: Bool { file == AudioInput.stdinName }
+  public var writesStdout: Bool { output == "-" }
 
   /// `auto` → nil; `de-DE` / `de_DE` / `DE` → `de`.
   public var languageCode: String? {

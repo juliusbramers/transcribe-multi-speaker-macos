@@ -56,6 +56,15 @@ step "transcribe"
 in_home 'tmsm "$1" --output "$2" --json' "$audio" "$work/out/"
 ls "$work/out"/*.md >/dev/null
 
+step "pipes and determinism: stdin → stdout, twice, byte for byte"
+base="$(basename "$audio")"
+in_home 'cat "$1" | tmsm - --name "$2" --output - --quiet' "$audio" "$base" > "$work/out/pipe-1.md"
+in_home 'cat "$1" | tmsm - --name "$2" --output - --quiet' "$audio" "$base" > "$work/out/pipe-2.md"
+cmp "$work/out/pipe-1.md" "$work/out/pipe-2.md"
+# Same heading as the file run (--name), so it must match that transcript too.
+cmp "$work/out/pipe-1.md" "$work/out/${base%.*}.md"
+echo "identical: two piped runs and the file run"
+
 step "uninstall"
 in_home 'tmsm uninstall --yes'
 

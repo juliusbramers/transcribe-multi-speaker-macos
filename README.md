@@ -10,7 +10,17 @@ Paste this line into Terminal (macOS 15 or later, Apple silicon):
 d="$(mktemp -d)" && cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO "$r/download/v$v/$f" && curl -fsSL "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install; cd ~ && rm -rf "$d"
 ```
 
-What the line does:
+### For agents and scripts
+
+The same line, then straight to Markdown on stdout (no file, no questions, missing models downloaded on the way):
+
+```sh
+d="$(mktemp -d)" && cd "$d" && r=https://github.com/juliusbramers/transcribe-multi-speaker-macos/releases && v="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$r/latest")" && v="${v##*/v}" && f="tmsm-$v-macos-arm64.tar.gz" && curl -fsSLO "$r/download/v$v/$f" && curl -fsSL "$r/download/v$v/SHA256SUMS" | grep " $f\$" | shasum -a 256 -c - && tar -xzf "$f" && "./tmsm-$v-macos-arm64/tmsm" install --no-setup >&2; cd ~ && rm -rf "$d" && ~/.tmsm/tmsm ~/memo.m4a --output - --quiet > memo.md
+```
+
+After that, `cat memo.m4a | tmsm - --output - --quiet` works too. [docs/cli.md](docs/cli.md) has the pipes, exit codes and the determinism guarantee.
+
+### What the install line does
 
 - It finds the latest release on this repository's Releases page and downloads its tarball into a temporary folder.
 - It checks the tarball against `SHA256SUMS` with `shasum -c` before anything is unpacked or run.
@@ -49,6 +59,7 @@ tmsm memo.opus                      # writes ~/Desktop/memo.md, prints its path
 tmsm interview.m4a --speakers 2 --language de
 tmsm meeting.mp4 --output ~/Notes/ --preset fast
 tmsm memo.opus --json               # result as JSON, for scripts and agents
+cat memo.m4a | tmsm - --output - --quiet > memo.md   # stdin to stdout, no file
 tmsm setup                          # change the preset, or pick models one by one
 tmsm setup --list                   # presets and models, with download sizes
 ```

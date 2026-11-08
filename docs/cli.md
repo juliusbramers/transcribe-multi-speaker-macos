@@ -4,8 +4,8 @@ How `tmsm` behaves when a script or another program calls it: what goes to stdou
 
 ## The rules
 
-- **A run never asks.** `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4), language `auto`, output to the Desktop, and the configured preset.
-- **stdout holds only the result**: the path of the written file, or one JSON object with `--json`. Everything else goes to stderr.
+- **A run never asks.** `tmsm <file>` with missing flags uses defaults: speakers `auto` (at most 4), language `auto`, output to the Desktop, and the configured preset (else `default`). Models that are missing are downloaded, with progress on stderr.
+- **stdout holds only the result**: the path of the written file, the Markdown itself with `--output -`, or one JSON object with `--json`. Everything else goes to stderr.
 - **Progress goes to stderr.** In a terminal it is one redrawn line. Without one, it is a plain line per stage (`tmsm: Transcribing`). `--quiet` turns it off.
 - **Errors**: one line, `tmsm: <message>`, on stderr. The exit code is non-zero.
 - **Exit codes**: `0` success, `1` failure, `64` bad usage (an unknown flag or value).
@@ -34,7 +34,26 @@ tmsm recording.m4a --speakers 2 --language de --output ~/Notes/ --preset fast
 }
 ```
 
-`speakerModel` is absent when `--speakers 1` skips speaker labelling. The Markdown file has a `# <file name>` heading, then one `Speaker N: …` paragraph per turn, without timestamps.
+`speakerModel` is absent when `--speakers 1` skips speaker labelling. The Markdown file has a `# <file name>` heading (or `--name`), then one `Speaker N: …` paragraph per turn, without timestamps.
+
+## Pipes
+
+From nothing to Markdown in one command, with pipes both ways:
+
+```sh
+tmsm memo.m4a --output - --quiet > memo.md                # Markdown to stdout, no file
+cat memo.m4a | tmsm - --output - --quiet > memo.md        # audio from stdin too
+ssh phone cat voice.opus | tmsm - --name "Journal 2026-11-08" --output - >> journal.md
+```
+
+- `--output -` writes the Markdown to stdout and creates no file. Progress stays on stderr, and `--quiet` silences it.
+- `tmsm -` reads the audio from stdin. It is copied to a temp file of the run's own under `TMSM_HOME` and deleted afterwards, even on errors. Its format is detected from the first bytes (ogg/opus, flac, wav, aiff, caf, m4a/mp4, mov, mp3, aac, webm). The heading and the Desktop file name are `stdin` unless `--name` is given.
+- With `--json` and `--output -`, the JSON has no `output` path. It carries the transcript in a `markdown` field instead, and `input` is `-` for stdin.
+- On a fresh install with no models, the first run downloads the preset's models without asking. A pipe works from the very first run.
+
+## Determinism
+
+The same audio, preset and options, on the same tmsm version and Mac, give byte-identical Markdown. Nothing random, no timestamps of the run, and no paths go into the transcript. `scripts/package-check.sh` checks this on every packaging run: two piped runs and one file run must match byte for byte.
 
 `tmsm <file>` is short for `tmsm transcribe <file>`. A file named like a subcommand (`setup`) needs `tmsm transcribe setup` or a path such as `./setup`.
 
@@ -111,19 +130,22 @@ SUBCOMMANDS:
 ```text
 OVERVIEW: Transcribe a file (the default command: `tmsm <file>`).
 
-USAGE: tmsm transcribe <file> [--speakers <speakers>] [--language <language>] [--output <output>] [--preset <preset>] [--json] [--quiet]
+USAGE: tmsm transcribe <file> [--speakers <speakers>] [--language <language>] [--output <output>] [--name <name>] [--preset <preset>] [--json] [--quiet]
 
 ARGUMENTS:
   <file>                  Audio or video file: m4a, mp3, ogg/opus, wav, flac,
-                          mp4, mov, …
+                          mp4, mov, …; - reads stdin.
 
 OPTIONS:
   --speakers <speakers>   Number of speakers: 1-4 or auto (at most 4). (values:
                           auto, 1, 2, 3, 4; default: auto)
   --language <language>   Spoken language as an ISO 639-1 code (de, en, …) or
                           auto. (default: auto)
-  -o, --output <output>   Output file or folder (default: the Desktop).
-                          Existing files are never overwritten.
+  -o, --output <output>   Output file or folder (default: the Desktop); -
+                          writes the Markdown to stdout. Existing files are
+                          never overwritten.
+  --name <name>           Name for the heading and the output file (default:
+                          the input's file name; stdin for -).
   --preset <preset>       Preset for this run: fast, default, individual
                           (default: the configured preset).
   --json                  Print the result as JSON on stdout instead of the

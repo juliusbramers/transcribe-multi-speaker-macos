@@ -48,12 +48,21 @@ struct Transcribe: AsyncParsableCommand {
     do {
       try Uninstaller.claim(home, environment: ProcessInfo.processInfo.environment)
       runTemp = try home.activate()
-      if options.preset == nil && !options.json && !options.quiet {
-        try await firstLaunch(home, console: TerminalConsole())
-      }
-      let result = try await Pipeline(home: home).run(options, progress: progress)
+      // Only a person at a terminal is asked; anything piped, or any flag a script would
+      // pass, means "use the default and download what's missing".
+      let person =
+        options.preset == nil && !options.json && !options.quiet && !options.readsStdin
+        && !options.writesStdout && isatty(STDOUT_FILENO) == 1
+      if person { try await firstLaunch(home, console: TerminalConsole()) }
+      let result = try await Pipeline(home: home, scratch: runTemp).run(options, progress: progress)
       progress.finish()
-      print(options.json ? result.json : result.output)
+      if options.json {
+        print(result.json)
+      } else if let markdown = result.markdown {
+        FileHandle.standardOutput.write(Data(markdown.utf8))
+      } else {
+        print(result.output ?? "")
+      }
     } catch {
       progress.finish()
       throw fail(error)

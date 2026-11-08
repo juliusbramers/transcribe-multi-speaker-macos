@@ -1,8 +1,10 @@
 import Foundation
 
-/// What a run reports: the path on stdout, or all of it with `--json`.
+/// What a run reports: the path on stdout, or all of it with `--json`. With `--output -`
+/// there is no file: `output` is nil and `markdown` holds the transcript.
 public struct RunResult: Codable, Sendable, Equatable {
-  public var output: String
+  public var output: String?
+  public var markdown: String?
   public var input: String
   public var preset: String
   public var transcriptionModel: String
@@ -11,6 +13,23 @@ public struct RunResult: Codable, Sendable, Equatable {
   public var speakers: Int
   public var durationSeconds: Double
   public var words: Int
+
+  public init(
+    output: String?, markdown: String?, input: String, preset: String,
+    transcriptionModel: String, speakerModel: String?, language: String, speakers: Int,
+    durationSeconds: Double, words: Int
+  ) {
+    self.output = output
+    self.markdown = markdown
+    self.input = input
+    self.preset = preset
+    self.transcriptionModel = transcriptionModel
+    self.speakerModel = speakerModel
+    self.language = language
+    self.speakers = speakers
+    self.durationSeconds = durationSeconds
+    self.words = words
+  }
 
   public var json: String {
     let encoder = JSONEncoder()
@@ -26,16 +45,22 @@ public struct Pipeline: Sendable {
   public var catalogue: Catalogue
   public var environment: [String: String]
   public var cwd: URL
+  /// Where `tmsm -` copies stdin: the run's own temp folder (removed with it).
+  public var scratch: URL?
+  public var stdin: FileHandle
 
   public init(
     home: TMSMHome, catalogue: Catalogue = .shared,
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    cwd: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    cwd: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
+    scratch: URL? = nil, stdin: FileHandle = .standardInput
   ) {
     self.home = home
     self.catalogue = catalogue
     self.environment = environment
     self.cwd = cwd
+    self.scratch = scratch
+    self.stdin = stdin
   }
 
   /// The Desktop of `$HOME` (so a temp-HOME test stays inside its HOME).
@@ -52,23 +77,44 @@ public struct Pipeline: Sendable {
   }
 
   public func run(_ options: RunOptions, progress: Progress) async throws -> RunResult {
-    let input = URL(
-      fileURLWithPath: (options.file as NSString).expandingTildeInPath, relativeTo: cwd
-    )
-    .standardizedFileURL
     let preset = try resolvePreset(options)
     // An unsupported --language fails before any decoding.
     if let language = options.languageCode {
       _ = try PresetRouting.route(preset, language: language, catalogue: catalogue)
     }
     // A gated model needs a Hugging Face token: HF_TOKEN, else the one `tmsm setup` stored.
-    let gated = try [asrEntry, catalogue.entry(preset.speakers)].filter(\.gated)
+    let gated = try preset.entries.map(catalogue.entry).filter(\.gated)
     if let first = gated.first {
       try Credentials.exportToken(for: first.name, environment: environment)
     }
 
+    let input: URL
+    if options.readsStdin {
+      progress.activity("Reading stdin")
+      input = try AudioInput.copy(from: stdin, into: scratch ?? home.temporary)
+    } else {
+      input =
+        URL(
+          fileURLWithPath: (options.file as NSString).expandingTildeInPath, relativeTo: cwd
+        ).standardizedFileURL
+    }
     progress.activity("Decoding audio")
-    let audio = try AudioDecoder.decode(input, environment: environment)
+    let audio: Audio
+    do {
+      audio = try AudioDecoder.decode(input, environment: environment)
+    } catch {
+      guard options.readsStdin else { throw error }
+      try? FileManager.default.removeItem(at: input)
+      // The temp copy's path means nothing to the caller.
+      if case TMSMError.undecodableAudio(_, let reason) = error {
+        throw TMSMError.undecodableAudio(
+          "stdin", reason.replacingOccurrences(of: input.path, with: "stdin"))
+      }
+      if case TMSMError.emptyAudio = error { throw TMSMError.emptyAudio("stdin") }
+      throw error
+    }
+    if options.readsStdin { try? FileManager.default.removeItem(at: input) }
+    let title = Pipeline.title(options)
 
     // The language (given or detected once) picks the entry and strategy (see PresetRouting).
     let choice = try await PresetRouting.resolve(
@@ -112,26 +158,45 @@ public struct Pipeline: Sendable {
     }
 
     if environment["TMSM_DEBUG"] == "1" {
-      dumpDebug(input: input, preset: preset.name, words: words, track: track)
+      dumpDebug(name: title, preset: preset.name, words: words, track: track)
     }
-    let transcript = Transcript(title: input.lastPathComponent, words: words, speakers: speakers)
+    let transcript = Transcript(title: title, words: words, speakers: speakers)
 
-    progress.activity("Writing")
-    let target = OutputFile.target(
-      input: input, output: options.output, desktop: desktop, cwd: cwd)
-    try FileManager.default.createDirectory(
-      at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-    let written = try OutputFile.write(transcript.markdown, to: target)
+    var written: URL?
+    if !options.writesStdout {
+      progress.activity("Writing")
+      let target = OutputFile.target(
+        input: Pipeline.nameSource(options, input: input), output: options.output,
+        desktop: desktop, cwd: cwd)
+      try FileManager.default.createDirectory(
+        at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+      written = try OutputFile.write(transcript.markdown, to: target)
+    }
 
     return RunResult(
-      output: written.path, input: input.path, preset: preset.name,
+      output: written?.path, markdown: options.writesStdout ? transcript.markdown : nil,
+      input: options.readsStdin ? AudioInput.stdinName : input.path, preset: preset.name,
       transcriptionModel: asrEntry.id, speakerModel: speakerEntry?.id,
       language: language ?? "auto", speakers: transcript.speakerCount,
       durationSeconds: (audio.duration * 10).rounded() / 10, words: words.count)
   }
 
+  /// The heading: `--name`, else the input's file name, else `stdin`.
+  public static func title(_ options: RunOptions) -> String {
+    if let name = options.name, !name.isEmpty { return name }
+    if options.readsStdin { return "stdin" }
+    return URL(fileURLWithPath: options.file).lastPathComponent
+  }
+
+  /// The URL whose name the output file takes: `<name>.md` with `--name` or for stdin.
+  public static func nameSource(_ options: RunOptions, input: URL) -> URL {
+    guard options.name?.isEmpty == false || options.readsStdin else { return input }
+    let safe = title(options).replacingOccurrences(of: "/", with: "-")
+    return URL(fileURLWithPath: "/").appendingPathComponent(safe + ".audio")
+  }
+
   /// `TMSM_DEBUG=1`: the raw words and segments go to `<home>/cache/debug/<name>.json`.
-  private func dumpDebug(input: URL, preset: String, words: [Word], track: SpeakerTrack) {
+  private func dumpDebug(name: String, preset: String, words: [Word], track: SpeakerTrack) {
     struct Dump: Encodable {
       var words: [Word]
       var segments: [SpeakerSegment]
@@ -140,8 +205,9 @@ public struct Pipeline: Sendable {
     }
     let dir = home.cache.appendingPathComponent("debug", isDirectory: true)
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let file = dir.appendingPathComponent(
-      input.deletingPathExtension().lastPathComponent + "-\(preset).json")
+    let stem = URL(fileURLWithPath: "/" + name.replacingOccurrences(of: "/", with: "-"))
+      .deletingPathExtension().lastPathComponent
+    let file = dir.appendingPathComponent(stem + "-\(preset).json")
     let dump = Dump(
       words: words, segments: track.segments, activitySpeakers: track.activity?.speakers,
       activity: track.activity?.values)

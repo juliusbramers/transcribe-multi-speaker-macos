@@ -13,6 +13,7 @@ enum SetupCases {
     program(t)
     uninstall(t)
     update(t)
+    pipes(t)
     docs(t)
   }
 
@@ -618,6 +619,84 @@ enum SetupCases {
       expectError(t, SetupError.checksum(asset)) { _ = try updater.fetch("9.9.9", into: again) }
       t.expect(
         exists(again.appendingPathComponent("tmsm-9.9.9-macos-arm64")), false, "not unpacked")
+    }
+  }
+
+  // MARK: Pipes
+
+  static func pipes(_ t: Runner) {
+    t.test("pipes: the format of stdin comes from its first bytes") {
+      func sniff(_ bytes: [UInt8]) -> String? { AudioInput.sniff(Data(bytes)) }
+      func ascii(_ text: String, pad: Int = 0) -> [UInt8] {
+        Array(text.utf8) + [UInt8](repeating: 0, count: pad)
+      }
+      t.expect(sniff(ascii("OggS", pad: 8)), "ogg")
+      t.expect(sniff(ascii("fLaC")), "flac")
+      t.expect(sniff(ascii("RIFF") + [1, 2, 3, 4] + ascii("WAVE")), "wav")
+      t.expect(sniff(ascii("RIFF") + [1, 2, 3, 4] + ascii("AVI ")), nil)
+      t.expect(sniff([0, 0, 0, 0x20] + ascii("ftypM4A ")), "m4a")
+      t.expect(sniff([0, 0, 0, 0x14] + ascii("ftypqt  ")), "mov")
+      t.expect(sniff([0, 0, 0, 0x18] + ascii("ftypisom")), "m4a")
+      t.expect(sniff(ascii("ID3") + [4, 0]), "mp3")
+      t.expect(sniff([0xFF, 0xFB, 0x90]), "mp3")
+      t.expect(sniff([0xFF, 0xF1, 0x50]), "aac")
+      t.expect(sniff([0x1A, 0x45, 0xDF, 0xA3]), "webm")
+      t.expect(sniff(ascii("hello")), nil)
+      t.expect(sniff([]), nil)
+    }
+
+    t.test("pipes: stdin is copied whole into the run folder, empty input is an error") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let pipe = Pipe()
+      let body = Data("fLaC".utf8) + Data(repeating: 7, count: 3 << 20)
+      let writer = Thread {
+        pipe.fileHandleForWriting.write(body)
+        try? pipe.fileHandleForWriting.close()
+      }
+      writer.start()
+      let file = try AudioInput.copy(from: pipe.fileHandleForReading, into: dir)
+      t.expect(file.lastPathComponent, "stdin.flac")
+      t.expect(try Data(contentsOf: file), body, "every byte, across chunks")
+      t.expect(
+        try FileManager.default.contentsOfDirectory(atPath: dir.path), ["stdin.flac"],
+        "no partial file left")
+
+      let empty = Pipe()
+      try empty.fileHandleForWriting.close()
+      expectError(t, TMSMError.emptyAudio("stdin")) {
+        _ = try AudioInput.copy(from: empty.fileHandleForReading, into: dir)
+      }
+    }
+
+    t.test("pipes: - for input and output parse; names for heading and file") {
+      let piped = try RunOptions.parse(["-", "--output", "-"])
+      t.expect(piped.readsStdin, true)
+      t.expect(piped.writesStdout, true)
+      t.expect(Pipeline.title(piped), "stdin")
+      let named = try RunOptions.parse(["-", "--name", "Journal 2026/11/08"])
+      t.expect(Pipeline.title(named), "Journal 2026/11/08")
+      let source = Pipeline.nameSource(named, input: URL(fileURLWithPath: "/tmp/stdin.m4a"))
+      t.expect(
+        OutputFile.target(
+          input: source, output: nil, desktop: URL(fileURLWithPath: "/d"),
+          cwd: URL(fileURLWithPath: "/")
+        ).path, "/d/Journal 2026-11-08.md")
+      let file = try RunOptions.parse(["~/memo.v2.opus"])
+      t.expect(Pipeline.title(file), "memo.v2.opus")
+      let input = URL(fileURLWithPath: "/x/memo.v2.opus")
+      t.expect(Pipeline.nameSource(file, input: input), input, "a file keeps its own name")
+    }
+
+    t.test("pipes: --json with --output - carries the Markdown, no path") {
+      let result = RunResult(
+        output: nil, markdown: "# stdin\n\nSpeaker 1: Hi.\n", input: "-", preset: "fast",
+        transcriptionModel: "a", speakerModel: nil, language: "auto", speakers: 1,
+        durationSeconds: 1, words: 1)
+      let object =
+        try JSONSerialization.jsonObject(with: Data(result.json.utf8)) as? [String: Any] ?? [:]
+      t.expect(object["output"] == nil, "no output key")
+      t.expect(object["markdown"] as? String, "# stdin\n\nSpeaker 1: Hi.\n")
     }
   }
 
