@@ -59,6 +59,9 @@ The same audio, preset and options, on the same tmsm version and Mac, give byte-
 
 ## First launch and setup
 
+The presets, their models and measured RAM are in [models.md](models.md). `tmsm setup --list` (quoted below) prints them from the program itself.
+
+
 - If no preset has been chosen yet, the first run in a terminal asks for one and downloads it. Without a terminal, or with `--preset`, `--json` or `--quiet`, nothing is asked: the run uses the `default` preset, downloads its models as needed, and saves no choice.
 - `tmsm setup` without options asks in a terminal. With options it never asks, which is how an agent sets up:
 
@@ -146,8 +149,8 @@ OPTIONS:
                           never overwritten.
   --name <name>           Name for the heading and the output file (default:
                           the input's file name; stdin for -).
-  --preset <preset>       Preset for this run: fast, default, individual
-                          (default: the configured preset).
+  --preset <preset>       Preset for this run: fast, default, accurate,
+                          extreme, individual (default: the configured preset).
   --json                  Print the result as JSON on stdout instead of the
                           output path.
   -q, --quiet             No progress on stderr.
@@ -189,15 +192,22 @@ OPTIONS:
 <!-- tmsm setup --list -->
 ```text
 Presets (tmsm setup --preset <name>):
-  fast        parakeet-v3 + nemotron3-c128-split-w8a8, 575 MB download
-              Parakeet v3 + Nemotron-3 c128-split-w8a8, ~1 GB RAM, 25 languages
-* default     parakeet-ultra + nemotron3-offline, 820 MB download
-              Parakeet Ultra + Nemotron-3 offline, ~1.5 GB RAM, 25 languages
+  fast        Parakeet Ultra + Nemotron-3 offline, speakers by overlap; peak RAM 0.4 GB
+              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
+* default     Parakeet Ultra + Nemotron-3 offline, decoded speaker turn by speaker turn; peak RAM 0.4 GB
+              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
+  accurate    Parakeet Ultra for en/de, Qwen3-ASR 1.7B 8-bit for other languages, turn by turn; peak RAM 0.4–6.2 GB
+              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
+  extreme     Currently identical to accurate: no larger pipeline measured better with v0.1.0 engines; peak RAM 0.4–6.2 GB
+              4.6 GB download: parakeet-ultra, qwen3-asr-1.7b-8bit, nemotron3-offline
   individual  any two models below (tmsm setup --transcription <id> --speakers <id>)
 
 Speech-to-text models:
-  parakeet-v3     Parakeet TDT 0.6B v3, 480 MB, 25 languages, CC-BY-4.0
-  parakeet-ultra  Parakeet Ultra, 630 MB, 25 languages, CC-BY-4.0
+  parakeet-v3           Parakeet TDT 0.6B v3, 480 MB, 25 languages, CC-BY-4.0
+  parakeet-ultra        Parakeet Ultra, 630 MB, 25 languages, CC-BY-4.0
+  qwen3-asr-1.7b-8bit   Qwen3-ASR 1.7B 8-bit, 3.7 GB, 28 languages, Apache-2.0
+  qwen3-asr-1.7b-5bit   Qwen3-ASR 1.7B 5-bit, 3.7 GB, 28 languages, Apache-2.0
+  voxtral-mini-3b-8bit  Voxtral Mini 3B 8-bit, 6.9 GB, 8 languages, Apache-2.0
 
 Speaker models:
   nemotron3-c128-split-w8a8  Nemotron-3 Diarization (c128-split-w8a8), 95 MB, OpenMDW-1.1

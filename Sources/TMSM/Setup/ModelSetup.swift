@@ -22,20 +22,23 @@ public struct ModelSetup: Sendable {
   /// Presets plus `individual`, in catalogue order.
   public var choices: [String] { catalogue.presetNames + [Config.individual] }
 
-  /// Every catalogue entry a preset may run. The one place to extend when a preset routes
-  /// between several transcription models.
-  public static func modelIDs(_ preset: Preset) -> [String] {
-    [preset.transcription, preset.speakers]
-  }
+  /// Every catalogue entry a preset may run (routes, language detectors, speakers).
+  public static func modelIDs(_ preset: Preset) -> [String] { preset.entries }
 
   public func downloadMB(_ preset: Preset) -> Int {
-    Self.modelIDs(preset).compactMap { try? catalogue.entry($0).downloadMB }
-      .reduce(0, +)
+    Self.modelIDs(preset).compactMap { try? catalogue.entry($0).downloadMB }.reduce(0, +)
   }
 
-  /// The one place that describes a preset's footprint. Shows the engine's summary until the
-  /// catalogue carries a measured RAM figure (then: `preset.ramGB`).
-  public static func memoryText(_ preset: Preset) -> String { preset.summary }
+  /// The one place that describes a preset's footprint: its measured peak RAM, else the
+  /// summary alone.
+  public static func memoryText(_ preset: Preset) -> String {
+    guard let ram = preset.ramGB else { return preset.summary }
+    let gb = { (v: Double) in String(format: v < 10 ? "%.1f" : "%.0f", v) }
+    let range =
+      ram.lowerBound == ram.upperBound
+      ? gb(ram.upperBound) : "\(gb(ram.lowerBound))–\(gb(ram.upperBound))"
+    return "\(preset.summary); peak RAM \(range) GB"
+  }
 
   /// The table `tmsm setup --list` prints and the docs quote verbatim. `*` marks the preset
   /// runs use: the configured one, else `default`.
@@ -45,10 +48,10 @@ public struct ModelSetup: Sendable {
     let width = choices.map(\.count).max() ?? 0
     for preset in catalogue.presets {
       let mark = inUse == preset.name ? "*" : " "
+      lines.append("\(mark) \(pad(preset.name, width))  \(Self.memoryText(preset))")
       lines.append(
-        "\(mark) \(pad(preset.name, width))  \(preset.transcription) + \(preset.speakers), "
-          + "\(Self.size(downloadMB(preset))) download")
-      lines.append("  \(pad("", width))  \(Self.memoryText(preset))")
+        "  \(pad("", width))  \(Self.size(downloadMB(preset))) download: "
+          + Self.modelIDs(preset).joined(separator: ", "))
     }
     let mark = inUse == Config.individual ? "*" : " "
     lines.append(
@@ -180,18 +183,11 @@ public struct ModelSetup: Sendable {
 
   // MARK: Downloading
 
-  /// Downloads and prepares both models by running each once on a second of silence: the
-  /// engines fetch, compile and release their models exactly as a real run does.
+  /// Downloads every entry the preset may run, each through its engine's own `prepare`
+  /// (download bars on stderr), so later runs need no network.
   public func prepare(_ preset: Preset, progress: Progress) async throws {
-    let silence = Audio(samples: [Float](repeating: 0, count: Audio.sampleRate))
     for id in Self.modelIDs(preset) {
-      switch try catalogue.entry(id).factory {
-      case .transcription(let make):
-        _ = try await make(home).transcribe(silence, language: nil, progress: progress)
-      case .speakers(let make):
-        _ = try await make(home).label(
-          silence, maxSpeakers: SpeakerCount.maximum, progress: progress)
-      }
+      try await catalogue.entry(id).prepare(home, progress)
     }
   }
 
@@ -203,21 +199,36 @@ public struct ModelSetup: Sendable {
     public var bytes: Int64
   }
 
-  /// Models on disk that `keep` does not use. A path that holds or sits inside a kept model's
-  /// path is never offered.
+  /// Folders earlier tmsm versions downloaded to, which no entry uses any more.
+  public static func legacyFolders(_ home: TMSMHome) -> [(id: String, url: URL)] {
+    // Nemotron-3 before it was pinned to one commit (now models/fluidaudio/nemotron-<rev>/).
+    [
+      (
+        "nemotron-3 (old download)",
+        home.models(engine: "fluidaudio")
+          .appendingPathComponent("nemotron-3-diarization")
+      )
+    ]
+  }
+
+  /// Models on disk that `keep` does not use, and old downloads. A path that holds or sits
+  /// inside a kept model's path is never offered.
   public func unusedModels(keeping keep: Preset) -> [StoredModel] {
     let kept = Self.modelIDs(keep).compactMap { try? catalogue.entry($0) }
       .flatMap { $0.storage(home) }.map(\.standardizedFileURL.path)
     let fm = FileManager.default
     var seen: Set<String> = []
-    return catalogue.entries.compactMap { entry in
-      let paths = entry.storage(home).map(\.standardizedFileURL).filter { url in
+    let candidates =
+      catalogue.entries.map { ($0.id, $0.storage(home)) }
+      + Self.legacyFolders(home).map { ($0.id, [$0.url]) }
+    return candidates.compactMap { id, storage in
+      let paths = storage.map(\.standardizedFileURL).filter { url in
         let path = url.path
         guard fm.fileExists(atPath: path), seen.insert(path).inserted else { return false }
         return !kept.contains { $0 == path || $0.hasPrefix(path + "/") || path.hasPrefix($0 + "/") }
       }
       guard !paths.isEmpty else { return nil }
-      return StoredModel(id: entry.id, paths: paths, bytes: paths.map(Self.bytes).reduce(0, +))
+      return StoredModel(id: id, paths: paths, bytes: paths.map(Self.bytes).reduce(0, +))
     }
   }
 
@@ -261,7 +272,9 @@ public struct ModelSetup: Sendable {
       try Credentials.exportToken(
         for: first.name, environment: environment, attended: console.isInteractive)
     }
-    console.say("Downloading \(preset.name): \(preset.transcription) + \(preset.speakers)")
+    console.say(
+      "Downloading \(preset.name) (\(Self.size(downloadMB(preset)))): "
+        + Self.modelIDs(preset).joined(separator: ", "))
     do {
       try await prepare(preset, progress: progress)
       progress.finish()

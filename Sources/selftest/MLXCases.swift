@@ -72,7 +72,7 @@ enum MLXCases {
             "--quiet",
           ])
           let result = try await Pipeline(home: home).run(options, progress: .silent)
-          texts.append(try Data(contentsOf: URL(fileURLWithPath: result.output)))
+          texts.append(try Data(contentsOf: URL(fileURLWithPath: result.output ?? "")))
         }
         outcome.withLock { $0 = .success(texts) }
       } catch { outcome.withLock { $0 = .failure(error) } }

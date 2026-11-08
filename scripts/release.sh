@@ -41,6 +41,10 @@ built="$(git rev-parse HEAD)"
 step "release build ($version, arm64, commit ${built%"${built#????????????}"})"
 swift build -c release --arch arm64 --product tmsm
 bin="$(swift build -c release --arch arm64 --show-bin-path)"
+if grep -q 'mlx-swift' Package.resolved 2>/dev/null; then
+  step "mlx.metallib (release)"
+  scripts/build-metallib.sh release
+fi
 
 step "stage $name/"
 rm -rf "$dist"
@@ -58,7 +62,28 @@ if grep -q 'mlx-swift' Package.resolved 2>/dev/null; then
     exit 1
   }
 fi
+# Back-deployment dylibs the binary links through @rpath (libswiftCompatibilitySpan on macOS 15,
+# which lacks it in /usr/lib/swift): shipped beside tmsm from the toolchain that built it.
+for dep in $(otool -L "$bin/tmsm" | tail -n +2 | awk '$1 ~ /^@rpath\// { print substr($1, 8) }'); do
+  found=""
+  for dir in $(otool -l "$bin/tmsm" | awk '$1 == "path" { print $2 }') \
+    "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-6.2/macosx"; do
+    case "$dir" in /usr/lib/* | @*) continue ;; esac
+    if [ -f "$dir/$dep" ]; then found="$dir/$dep"; break; fi
+  done
+  [ -n "$found" ] || { echo "can't find $dep in the toolchain to ship it" >&2; exit 1; }
+  cp "$found" "$dist/$name/$dep"
+  echo "shipping $dep from $found"
+done
 cp NOTICE README.md "$dist/$name/"
+# The licence of every resolved package (MIT and Apache code is compiled into tmsm).
+for dir in .build/checkouts/*; do
+  lic="$(find "$dir" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) | sort | head -1)"
+  [ -n "$lic" ] || { echo "no licence file in $dir" >&2; exit 1; }
+  printf '==== %s ====\n\n' "$(basename "$dir")"
+  cat "$lic"
+  printf '\n\n'
+done > "$dist/$name/THIRD_PARTY_LICENSES"
 cp scripts/uninstall.sh "$dist/$name/uninstall.sh"
 chmod +x "$dist/$name/uninstall.sh"
 [ -f LICENSE ] && cp LICENSE "$dist/$name/"
@@ -110,6 +135,23 @@ got="$("$dist/$name/tmsm" --version)"
 [ "$got" = "$version" ] || { echo "tmsm --version says $got, expected $version" >&2; exit 1; }
 "$dist/$name/tmsm" --help >/dev/null
 echo "tmsm --version: $got"
+
+# This Mac's /usr/lib/swift has the back-deploy dylibs; macOS 15's doesn't. A relocated copy
+# without that rpath must load the shipped ones, from beside the binary.
+if ls "$dist/$name"/*.dylib >/dev/null 2>&1; then
+  step "shipped dylibs load from beside tmsm"
+  probe="$(mktemp -d)"
+  cp -R "$dist/$name/" "$probe/p"
+  install_name_tool -delete_rpath /usr/lib/swift "$probe/p/tmsm" 2>/dev/null || true
+  codesign --force --sign - "$probe/p/tmsm" 2>/dev/null
+  loaded="$(DYLD_PRINT_LIBRARIES=1 "$probe/p/tmsm" --version 2>&1 >/dev/null | grep -F "$probe/p/" || true)"
+  rm -rf "$probe"
+  for lib in "$dist/$name"/*.dylib; do
+    printf '%s\n' "$loaded" | grep -q "/$(basename "$lib")" \
+      || { echo "$(basename "$lib") did not load from beside tmsm" >&2; exit 1; }
+    echo "$(basename "$lib"): loaded from beside tmsm"
+  done
+fi
 
 step "tarball and SHA256SUMS"
 (cd "$dist" && COPYFILE_DISABLE=1 tar --no-mac-metadata --uid 0 --gid 0 -czf "$tarball" "$name")

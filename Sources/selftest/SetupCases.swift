@@ -46,19 +46,28 @@ enum SetupCases {
   }
 
   /// asr-a/asr-b/asr-gated, spk-a/spk-b; presets fast (a+a) and default (b+b).
-  static let catalogue = Catalogue([
-    EngineRegistration(
-      engine: "test",
-      entries: [
-        entry("asr-a", .transcription, mb: 400), entry("asr-b", .transcription, mb: 700),
-        entry("asr-gated", .transcription, gated: true),
-        entry("spk-a", .speakers, mb: 90), entry("spk-b", .speakers, mb: 190),
-      ],
-      presets: [
-        Preset(name: "fast", transcription: "asr-a", speakers: "spk-a", summary: "A"),
-        Preset(name: "default", transcription: "asr-b", speakers: "spk-b", summary: "B"),
-      ])
-  ])
+  static let catalogue = Catalogue(
+    [
+      EngineRegistration(
+        engine: "test",
+        entries: [
+          entry("asr-a", .transcription, mb: 400), entry("asr-b", .transcription, mb: 700),
+          entry("asr-gated", .transcription, gated: true),
+          entry("spk-a", .speakers, mb: 90), entry("spk-b", .speakers, mb: 190),
+        ])
+    ], presets: presets)
+
+  /// fast: measured RAM; default: none yet; routed: two speech models and a detector.
+  static let presets = [
+    Preset(
+      name: "fast", transcription: "asr-a", speakers: "spk-a", summary: "A", ramGB: 0.4...0.4),
+    Preset(name: "default", transcription: "asr-b", speakers: "spk-b", summary: "B", ramGB: nil),
+    Preset(
+      name: "routed", speakers: "spk-a", summary: "R", ramGB: 0.4...6.2,
+      routing: LanguageRouting(
+        routes: [.init("asr-a", .turnwise, only: ["de"]), .init("asr-b", .windows)],
+        detectors: ["asr-b"])),
+  ]
 
   /// Runs async code from the synchronous runner.
   static func blocking(_ body: @escaping @Sendable () async throws -> Void) throws {
@@ -203,8 +212,8 @@ enum SetupCases {
     }
 
     t.test("wizard: individual asks for one model of each kind") {
-      // choices: fast, default, individual; transcription: asr-a, asr-b, asr-gated.
-      let console = Scripted(["3", "1", ""])
+      // choices: fast, default, routed, individual; transcription: asr-a, asr-b, asr-gated.
+      let console = Scripted(["4", "1", ""])
       t.expect(
         try setup.ask(console, current: Config()),
         Config(preset: "individual", transcription: "asr-a", speakers: "spk-b"),
@@ -215,13 +224,43 @@ enum SetupCases {
     t.test("wizard and --list show catalogue figures, not hand-written ones") {
       let console = Scripted(["1"])
       _ = try setup.ask(console, current: Config())
-      t.expect(console.said.contains { $0.contains("fast: A, 490 MB download") }, "fast line")
+      t.expect(
+        console.said.contains { $0.contains("fast: A; peak RAM 0.4 GB, 490 MB download") },
+        "fast line: \(console.said)")
+      t.expect(
+        console.said.contains { $0.contains("default: B, 890 MB download") }, "no RAM yet")
       let list = setup.listing(current: Config(preset: "fast"))
-      t.expect(list.contains("* fast        asr-a + spk-a, 490 MB download"), "fast marked")
-      t.expect(list.contains("  default     asr-b + spk-b, 890 MB download"), "default")
+      t.expect(list.contains("* fast        A; peak RAM 0.4 GB\n"), "fast marked:\n\(list)")
+      t.expect(list.contains("490 MB download: asr-a, spk-a"), "fast models")
+      t.expect(list.contains("  routed      R; peak RAM 0.4–6.2 GB"), "range")
+      t.expect(
+        list.contains("1.2 GB download: asr-a, asr-b, spk-a"), "every routed model counted once")
       t.expect(list.contains("asr-gated  ASR-GATED, 100 MB, 1 languages, MIT, gated"), "gated")
       t.expect(
         setup.listing(current: Config()).contains("* default"), "no config: default is in use")
+    }
+
+    t.test("setup: a routed preset prepares every entry it may run, once each") {
+      final class Log: @unchecked Sendable { var ids: [String] = [] }
+      let log = Log()
+      func logged(_ id: String, _ kind: CatalogueEntry.Kind) -> CatalogueEntry {
+        var e = entry(id, kind)
+        e.prepare = { _, _ in log.ids.append(id) }
+        return e
+      }
+      let cat = Catalogue(
+        [
+          EngineRegistration(
+            engine: "test",
+            entries: [
+              logged("asr-a", .transcription), logged("asr-b", .transcription),
+              logged("spk-a", .speakers),
+            ])
+        ], presets: presets)
+      let routed = try cat.preset(named: "routed")
+      let s = ModelSetup(home: home, catalogue: cat, environment: [:])
+      try blocking { try await s.prepare(routed, progress: .silent) }
+      t.expect(log.ids, ["asr-a", "asr-b", "spk-a"])
     }
   }
 
@@ -230,7 +269,7 @@ enum SetupCases {
   static func token(_ t: Runner) {
     let home = TMSMHome(root: URL(fileURLWithPath: "/nonexistent/tmsm-home"))
     let gated = Preset(
-      name: "individual", transcription: "asr-gated", speakers: "spk-a", summary: "")
+      name: "individual", transcription: "asr-gated", speakers: "spk-a", summary: "", ramGB: nil)
 
     t.test("token: HF_TOKEN means nothing is asked") {
       let setup = ModelSetup(
@@ -307,6 +346,18 @@ enum SetupCases {
       t.expect(setup.unusedModels(keeping: fast).isEmpty, "nothing left to offer")
     }
 
+    t.test("unused: the pre-pin Nemotron folder is offered as an old download") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let home = TMSMHome(root: dir)
+      let old = home.models(engine: "fluidaudio").appendingPathComponent("nemotron-3-diarization")
+      try write("x", old.appendingPathComponent("offline/model.bin"))
+      let setup = ModelSetup(home: home, catalogue: catalogue, environment: [:])
+      let unused = setup.unusedModels(keeping: try catalogue.preset(named: "fast"))
+      t.expect(unused.map(\.id), ["nemotron-3 (old download)"])
+      t.expect(unused.first?.paths, [old.standardizedFileURL])
+    }
+
     t.test("unused: a folder that holds a kept model is never offered") {
       let dir = tempFolder()
       defer { try? FileManager.default.removeItem(at: dir) }
@@ -319,12 +370,14 @@ enum SetupCases {
         id: "inner", name: "Inner", engine: "test", languages: [], downloadMB: 1, license: "MIT",
         gated: false, factory: .speakers { _ in Silent() },
         storage: { _ in [shared.appendingPathComponent("inner")] })
-      let cat = Catalogue([
-        EngineRegistration(
-          engine: "test", entries: [entry("asr-a", .transcription), outer, inner], presets: [])
-      ])
+      let cat = Catalogue(
+        [
+          EngineRegistration(
+            engine: "test", entries: [entry("asr-a", .transcription), outer, inner])
+        ], presets: [])
       try write("x", shared.appendingPathComponent("inner/model"))
-      let keep = Preset(name: "x", transcription: "asr-a", speakers: "inner", summary: "")
+      let keep = Preset(
+        name: "x", transcription: "asr-a", speakers: "inner", summary: "", ramGB: nil)
       t.expect(
         ModelSetup(home: home, catalogue: cat, environment: [:]).unusedModels(keeping: keep)
           .map(\.id), [])

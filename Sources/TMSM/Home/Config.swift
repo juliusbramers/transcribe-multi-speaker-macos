@@ -50,6 +50,6 @@ public struct Config: Codable, Sendable, Equatable {
     }
     return Preset(
       name: Config.individual, transcription: transcription, speakers: speakers,
-      summary: "\(transcription) + \(speakers)")
+      summary: "\(transcription) + \(speakers)", ramGB: nil)
   }
 }

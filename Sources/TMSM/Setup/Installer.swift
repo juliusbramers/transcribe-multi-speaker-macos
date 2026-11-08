@@ -82,7 +82,8 @@ public struct Installer {
 
   /// What belongs to the program in a release folder; anything else is left out of the copy.
   public static func isProgramItem(_ name: String) -> Bool {
-    ["tmsm", "NOTICE", "README.md", "LICENSE", "uninstall.sh"].contains(name)
+    ["tmsm", "NOTICE", "README.md", "LICENSE", "THIRD_PARTY_LICENSES", "uninstall.sh"]
+      .contains(name)
       || name.hasSuffix(".metallib") || name.hasSuffix(".dylib") || name.hasSuffix(".bundle")
       || name.hasSuffix(".resources")
   }

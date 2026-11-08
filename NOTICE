@@ -9,14 +9,28 @@ Speech to text
 - Parakeet Ultra: Moondream (moondream/parakeet-ultra), CC-BY-4.0.
   Core ML conversion: FluidInference (FluidInference/parakeet-ultra-coreml), CC-BY-4.0.
 
+- Qwen3-ASR 1.7B: Qwen team, Alibaba Cloud (Qwen/Qwen3-ASR-1.7B), Apache-2.0.
+  MLX conversions, 8-bit and 5-bit: aufklarer (aufklarer/Qwen3-ASR-1.7B-MLX-8bit, -5bit).
+- Qwen3 forced aligner 0.6B: Qwen team, Alibaba Cloud (Qwen/Qwen3-ForcedAligner-0.6B),
+  Apache-2.0. MLX conversion: aufklarer (aufklarer/Qwen3-ForcedAligner-0.6B-8bit).
+- Voxtral Mini 3B 2507: Mistral AI (mistralai/Voxtral-Mini-3B-2507), Apache-2.0.
+  MLX conversion: aufklarer (aufklarer/Voxtral-Mini-3B-2507-MLX-8bit).
+
 Speaker labelling
 - Nemotron-3 Diarization: NVIDIA (nvidia/Nemotron-3-Diarization), OpenMDW-1.1.
   Core ML conversion: FluidInference (FluidInference/nemotron-3-diarization-coreml), OpenMDW-1.1.
 
 Software built into the tmsm executable
 - FluidAudio 0.18.2, FluidInference, Apache-2.0: https://github.com/FluidInference/FluidAudio
+- speech-swift 0.0.29, soniqo, Apache-2.0: https://github.com/soniqo/speech-swift
+- MLX Swift, Apple Inc., MIT: https://github.com/ml-explore/mlx-swift
 - Swift Argument Parser, Apple Inc., Apache-2.0: https://github.com/apple/swift-argument-parser
+- and the packages these depend on. THIRD_PARTY_LICENSES, beside this file in every release,
+  holds the licence text of every package the build resolved.
+
+Model details, sizes and the pinned commits: docs/models.md.
 
 CC-BY-4.0: https://creativecommons.org/licenses/by/4.0/
 OpenMDW-1.1: see https://huggingface.co/nvidia/Nemotron-3-Diarization
 Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0
+MIT: https://opensource.org/license/mit
