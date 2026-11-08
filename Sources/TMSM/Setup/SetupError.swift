@@ -9,6 +9,7 @@ public enum SetupError: Error, LocalizedError, Equatable {
   case needsTerminal(String)
   case notAProgramFolder(String)
   case foreignFiles(String, [String])
+  case notTMSMHome(String)
   case download(String)
   case checksum(String)
   case cancelled
@@ -32,6 +33,9 @@ public enum SetupError: Error, LocalizedError, Equatable {
     case .foreignFiles(let path, let names):
       return
         "\(path) holds files tmsm did not create (\(names.joined(separator: ", "))), so it was left alone"
+    case .notTMSMHome(let path):
+      return
+        "\(path) was not created by tmsm (TMSM_HOME points to an existing folder), so it was left alone; delete its models/ and cache/ yourself"
     case .download(let message):
       return "Download failed: \(message)"
     case .checksum(let file):

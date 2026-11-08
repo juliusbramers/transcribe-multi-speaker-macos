@@ -354,6 +354,48 @@ enum SetupCases {
       t.expect(read(profile), user, "the user's lines stay, even ones that mention tmsm")
     }
 
+    t.test("path: after a change of shell the line moves; still one line") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      try write("export A=1\n", dir.appendingPathComponent(".bash_profile"))
+      try Installer(environment: ["HOME": dir.path, "SHELL": "/bin/bash"]).addPathLine()
+      let zsh = Installer(environment: ["HOME": dir.path, "SHELL": "/bin/zsh"])
+      t.expect(try zsh.addPathLine(), true)
+      t.expect(read(dir.appendingPathComponent(".bash_profile")), "export A=1\n")
+      t.expect(read(dir.appendingPathComponent(".zprofile")), Installer.pathLine + "\n")
+      t.expect(try zsh.addPathLine(), false)
+    }
+
+    t.test("path: an unreadable profile is never overwritten") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let profile = dir.appendingPathComponent(".zprofile")
+      let latin1 = Data([0x65, 0x78, 0x70, 0xE9, 0x0A])  // not UTF-8
+      try latin1.write(to: profile)
+      let installer = Installer(environment: ["HOME": dir.path, "SHELL": "/bin/zsh"])
+      do {
+        try installer.addPathLine()
+        t.fail("expected an error")
+      } catch {}
+      t.expect(try Data(contentsOf: profile), latin1)
+    }
+
+    t.test("path: a symlinked profile stays a symlink") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let target = dir.appendingPathComponent("dotfiles/zprofile")
+      try write("export A=1\n", target)
+      let profile = dir.appendingPathComponent(".zprofile")
+      try FileManager.default.createSymbolicLink(at: profile, withDestinationURL: target)
+      let installer = Installer(environment: ["HOME": dir.path, "SHELL": "/bin/zsh"])
+      try installer.addPathLine()
+      t.expect(read(target), "export A=1\n" + Installer.pathLine + "\n")
+      try installer.removePathLines()
+      t.expect(read(target), "export A=1\n")
+      t.expect(
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: profile.path)) != nil, "link")
+    }
+
     t.test("path: a profile that held only our line goes with it") {
       let dir = tempFolder()
       defer { try? FileManager.default.removeItem(at: dir) }
@@ -433,6 +475,7 @@ enum SetupCases {
       let caches = userHome.appendingPathComponent("Library/Caches/tmsm")
       let other = userHome.appendingPathComponent("Library/Caches/other-app/keep")
       try write("{}", home.configFile)
+      try write("", home.root.appendingPathComponent(Uninstaller.markerName))
       try write("w", home.models(engine: "x").appendingPathComponent("m"))
       try write("c", caches.appendingPathComponent("e5"))
       try write("keep", other)
@@ -461,17 +504,20 @@ enum SetupCases {
       let support = dir.appendingPathComponent("Library/Application Support")
       let home = TMSMHome(root: support.appendingPathComponent("tmsm"))
       try write("{}", home.configFile)
+      try write("", home.root.appendingPathComponent(Uninstaller.markerName))
       let uninstaller = Uninstaller(home: home, installer: installer, leftovers: [])
       t.expect(uninstaller.run([.home(home.root)]).count, 0)
       t.expect(try FileManager.default.contentsOfDirectory(atPath: dir.path), [])
 
       try write("{}", home.configFile)
+      try write("", home.root.appendingPathComponent(Uninstaller.markerName))
       try write("x", support.appendingPathComponent("Other App/data"))
       t.expect(uninstaller.run([.home(home.root)]).count, 0)
       t.expect(read(support.appendingPathComponent("Other App/data")), "x")
 
       let custom = TMSMHome(root: dir.appendingPathComponent("a/b/tmsm"))
       try write("{}", custom.configFile)
+      try write("", custom.root.appendingPathComponent(Uninstaller.markerName))
       t.expect(
         Uninstaller(home: custom, installer: installer, leftovers: []).run([.home(custom.root)])
           .count, 0)
@@ -484,6 +530,7 @@ enum SetupCases {
       let shared = dir.appendingPathComponent("Documents")
       try write("mine", shared.appendingPathComponent("thesis.pages"))
       try write("{}", shared.appendingPathComponent("config.json"))
+      try write("", shared.appendingPathComponent(Uninstaller.markerName))
       let installer = Installer(environment: ["HOME": dir.path])
       try write("tmsm", installer.executable)
       let uninstaller = Uninstaller(
@@ -494,6 +541,37 @@ enum SetupCases {
         [SetupError.foreignFiles(shared.path, ["thesis.pages"])])
       t.expect(read(shared.appendingPathComponent("thesis.pages")), "mine")
       t.expect(exists(installer.programFolder), false, "the program still goes")
+    }
+    t.test("uninstall: a TMSM_HOME tmsm did not create is never removed") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      // Someone's model project that happens to look like a tmsm home.
+      let project = TMSMHome(root: dir.appendingPathComponent("project"))
+      try write("{}", project.configFile)
+      try write("weights", project.models.appendingPathComponent("mine.bin"))
+      let env = ["HOME": dir.appendingPathComponent("home").path, "TMSM_HOME": project.root.path]
+      try Uninstaller.claim(project, environment: env)
+      t.expect(exists(project.root.appendingPathComponent(Uninstaller.markerName)), false)
+      let uninstaller = Uninstaller(
+        home: project, installer: Installer(environment: env), leftovers: [])
+      expectError(t, SetupError.notTMSMHome(project.root.path)) {
+        if let error = uninstaller.run([.home(project.root)]).first { throw error }
+      }
+      t.expect(read(project.models.appendingPathComponent("mine.bin")), "weights")
+    }
+
+    t.test("uninstall: tmsm marks a home it creates, and the default home") {
+      let dir = tempFolder()
+      defer { try? FileManager.default.removeItem(at: dir) }
+      let fresh = TMSMHome(root: dir.appendingPathComponent("new/tmsm"))
+      try Uninstaller.claim(fresh, environment: ["TMSM_HOME": fresh.root.path])
+      t.expect(exists(fresh.root.appendingPathComponent(Uninstaller.markerName)), true, "new")
+      let env = ["HOME": dir.path]
+      let standard = TMSMHome.resolve(environment: env)
+      try write("{}", standard.configFile)  // exists already, but it is the default location
+      try Uninstaller.claim(standard, environment: env)
+      t.expect(
+        exists(standard.root.appendingPathComponent(Uninstaller.markerName)), true, "default")
     }
   }
 

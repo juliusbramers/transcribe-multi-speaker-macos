@@ -49,14 +49,14 @@ tmsm setup --transcription parakeet-v3 --speakers nemotron3-offline --delete-unu
 tmsm setup --list                                            # presets and models (quoted below)
 ```
 
-- Without `--delete-unused` or `--keep-unused`, setup keeps models it no longer needs whenever it can't ask.
+- With options, setup keeps models it no longer needs unless you pass `--delete-unused`. A gated model without a token is an error that names `HF_TOKEN`; setup never prompts.
 - A gated model needs a Hugging Face token. Pass it as `HF_TOKEN`. Agents never get the hidden prompt. A person running `tmsm setup` types it once, and it is kept in the Keychain under service `tmsm`. `HF_TOKEN` wins over the Keychain.
 
 ## Install, update, uninstall
 
 - `tmsm install`, run from an unpacked release, copies the program to `~/.tmsm` and adds one `PATH` line, marked `# tmsm`, to the login profile. It prints the installed executable's path. `--no-setup` skips the preset question.
 - `tmsm update` downloads the latest release, checks it against `SHA256SUMS`, and installs it. `tmsm update --check` prints the latest version and exits `0` only if it is newer. `--to <version>` installs a given version.
-- `tmsm uninstall --yes` removes the following, without asking: the tmsm home, the program, the `PATH` line, the Keychain item, and `~/Library/Caches/tmsm` and `~/Library/HTTPStorages/tmsm`. Without a terminal, `--yes` is required. If the tmsm home holds files tmsm did not create, it is left alone, the rest is removed, and the exit code is `1`.
+- `tmsm uninstall --yes` removes the following, without asking: the tmsm home, the program, the `PATH` line, the Keychain item, and `~/Library/Caches/tmsm` and `~/Library/HTTPStorages/tmsm`. Without a terminal, `--yes` is required. A tmsm home is removed only if tmsm created it (or it is the default location) and nothing else is in it. If `TMSM_HOME` names a folder that existed before tmsm, or one that holds other files, that folder is left alone, the rest is removed, and the exit code is `1`.
 
 ## Environment
 

@@ -46,6 +46,7 @@ struct Transcribe: AsyncParsableCommand {
     var runTemp: URL?
     defer { if let runTemp { home.removeRunTemporary(runTemp) } }
     do {
+      try Uninstaller.claim(home, environment: ProcessInfo.processInfo.environment)
       runTemp = try home.activate()
       if options.preset == nil && !options.json && !options.quiet {
         try await firstLaunch(home, console: TerminalConsole())
@@ -96,7 +97,6 @@ struct Setup: AsyncParsableCommand {
 
   func run() async throws {
     let home = TMSMHome.resolve()
-    let console = TerminalConsole()
     var runTemp: URL?
     defer { if let runTemp { home.removeRunTemporary(runTemp) } }
     do {
@@ -107,15 +107,21 @@ struct Setup: AsyncParsableCommand {
         return
       }
       let config: Config
+      let console: Console
       if preset == nil && transcription == nil && speakers == nil {
+        console = TerminalConsole()
         guard console.isInteractive else {
           throw SetupError.needsTerminal("Pass --preset, or --transcription and --speakers.")
         }
         config = try setup.ask(console, current: current)
       } else {
+        // With options nothing is asked: unused models stay unless --delete-unused, and a
+        // missing token is an error that names HF_TOKEN.
+        console = TerminalConsole(isInteractive: false)
         config = try setup.config(
           preset: preset, transcription: transcription, speakers: speakers, current: current)
       }
+      try Uninstaller.claim(home, environment: ProcessInfo.processInfo.environment)
       runTemp = try home.activate()
       let progress = Progress(mode: Progress.mode(quiet: false))
       try await setup.apply(
@@ -156,6 +162,7 @@ struct Install: AsyncParsableCommand {
       print(installer.executable.path)
       if !noSetup {
         let home = TMSMHome.resolve()
+        try Uninstaller.claim(home, environment: ProcessInfo.processInfo.environment)
         let runTemp = try home.activate()
         defer { home.removeRunTemporary(runTemp) }
         try await firstLaunch(home, console: console)

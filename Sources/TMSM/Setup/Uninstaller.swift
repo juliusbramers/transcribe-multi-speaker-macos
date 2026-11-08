@@ -15,8 +15,31 @@ public struct Uninstaller {
     self.leftovers = leftovers
   }
 
+  /// Written into a home that tmsm created (or the default one). Uninstall removes a home only
+  /// when it holds this file: folder names alone don't prove a folder is ours.
+  public static let markerName = ".tmsm-home"
+
   /// What a tmsm home may contain. Anything else means TMSM_HOME points somewhere shared.
-  static let homeItems: Set<String> = ["models", "cache", "config.json", ".DS_Store"]
+  static let homeItems: Set<String> = [
+    "models", "cache", "config.json", ".DS_Store", markerName,
+  ]
+
+  /// Call before anything writes to the home. Marks it as tmsm's when tmsm creates it, or when
+  /// it is the default location. An existing folder named by TMSM_HOME stays unmarked, so
+  /// uninstall will not remove it.
+  public static func claim(_ home: TMSMHome, environment: [String: String]) throws {
+    let fm = FileManager.default
+    let marker = home.root.appendingPathComponent(markerName)
+    if fm.fileExists(atPath: marker.path) { return }
+    var defaults = environment
+    defaults["TMSM_HOME"] = nil
+    let isDefault = TMSMHome.resolve(environment: defaults).root.path == home.root.path
+    let isNew = !fm.fileExists(atPath: home.root.path)
+    guard isNew || isDefault else { return }
+    try fm.createDirectory(at: home.root, withIntermediateDirectories: true)
+    try Data("This folder belongs to tmsm. `tmsm uninstall` removes it.\n".utf8)
+      .write(to: marker)
+  }
 
   public enum Item: Sendable, Equatable {
     case home(URL)
@@ -73,9 +96,12 @@ public struct Uninstaller {
     return errors
   }
 
-  /// Removes the home only if all of it is tmsm's.
+  /// Removes the home only if tmsm marked it as its own and nothing else is in it.
   func removeHome(_ url: URL) throws {
     let names = try FileManager.default.contentsOfDirectory(atPath: url.path)
+    guard names.contains(Uninstaller.markerName) else {
+      throw SetupError.notTMSMHome(url.path)
+    }
     let foreign = names.filter { !Uninstaller.homeItems.contains($0) }
     guard foreign.isEmpty else { throw SetupError.foreignFiles(url.path, foreign.sorted()) }
     try FileManager.default.removeItem(at: url)

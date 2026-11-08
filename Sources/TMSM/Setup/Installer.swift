@@ -107,18 +107,19 @@ public struct Installer {
 
   // MARK: PATH
 
-  /// Adds the marked line unless one is there. Returns true when it wrote one.
+  /// Makes the shell's own profile hold the one marked line, and no other profile hold one
+  /// (after a change of shell the line moves). Returns true when anything was written.
   @discardableResult
   public func addPathLine() throws -> Bool {
-    if profiles.contains(where: {
-      (try? Installer.lines(of: $0))?.contains(Installer.pathLine) == true
-    }) {
-      return false
+    var changed = false
+    for other in profiles where other.path != profile.path {
+      if try removeMarkedLines(from: other) { changed = true }
     }
-    var text = (try? String(contentsOf: profile, encoding: .utf8)) ?? ""
-    if !text.isEmpty && !text.hasSuffix("\n") { text += "\n" }
-    text += Installer.pathLine + "\n"
-    try text.write(to: profile, atomically: true, encoding: .utf8)
+    var lines = try Installer.lines(of: profile) ?? []
+    let marked = lines.filter(Installer.isMarkedLine)
+    if marked == [Installer.pathLine] { return changed }
+    lines = lines.filter { !Installer.isMarkedLine($0) } + [Installer.pathLine]
+    try Installer.write(lines, to: profile)
     return true
   }
 
@@ -126,20 +127,26 @@ public struct Installer {
   /// Returns the profiles that changed.
   @discardableResult
   public func removePathLines() throws -> [URL] {
-    var changed: [URL] = []
-    for profile in profiles {
-      guard let lines = try Installer.lines(of: profile) else { continue }
-      let kept = lines.filter { !Installer.isMarkedLine($0) }
-      guard kept.count != lines.count else { continue }
-      if kept.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-        try FileManager.default.removeItem(at: profile)
-      } else {
-        try (kept.joined(separator: "\n") + "\n").write(
-          to: profile, atomically: true, encoding: .utf8)
-      }
-      changed.append(profile)
+    try profiles.filter { try removeMarkedLines(from: $0) }
+  }
+
+  private func removeMarkedLines(from profile: URL) throws -> Bool {
+    guard let lines = try Installer.lines(of: profile) else { return false }
+    let kept = lines.filter { !Installer.isMarkedLine($0) }
+    guard kept.count != lines.count else { return false }
+    let isLink = (try? profile.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink
+    if kept.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }) && isLink != true {
+      try FileManager.default.removeItem(at: profile)
+    } else {
+      try Installer.write(kept, to: profile)
     }
-    return changed
+    return true
+  }
+
+  /// Writes through a symlinked profile (dotfile managers) instead of replacing the link.
+  static func write(_ lines: [String], to file: URL) throws {
+    let text = lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+    try text.write(to: file.resolvingSymlinksInPath(), atomically: true, encoding: .utf8)
   }
 
   /// Ours: ends with the marker and names the program folder.
