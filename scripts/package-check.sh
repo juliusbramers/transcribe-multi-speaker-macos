@@ -73,9 +73,13 @@ left=0
 if [ -n "$(ls -A "$work/home")" ]; then
   echo "left in the temp HOME:"; find "$work/home" -mindepth 1; left=1
 fi
-for p in "$account/Library/Caches/tmsm" "$account/Library/HTTPStorages/tmsm" "$account/.tmsm"; do
+for p in "$account/Library/Caches/tmsm" "$account/Library/HTTPStorages/tmsm"; do
   if [ -e "$p" ]; then echo "left: $p"; left=1; fi
 done
+# The account's own installation may exist; only one that appeared during the run counts.
+if [ -e "$account/.tmsm" ] && [ -n "$(find "$account/.tmsm" -maxdepth 0 -newer "$marker")" ]; then
+  echo "left: $account/.tmsm"; left=1
+fi
 if security find-generic-password -s tmsm >/dev/null 2>&1; then
   echo "left: Keychain item tmsm"; left=1
 fi
