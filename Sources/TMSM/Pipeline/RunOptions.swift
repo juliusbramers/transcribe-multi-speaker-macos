@@ -1,16 +1,20 @@
 import ArgumentParser
 import Foundation
 
-/// `--speakers 1-4|auto`.
+/// `--speakers none|1-4|auto`.
 public enum SpeakerCount: Equatable, Sendable, ExpressibleByArgument, CustomStringConvertible {
   public static let maximum = 4
   case auto
   case exactly(Int)
+  /// No speaker labelling at all: the transcript is paragraphs without `Speaker N:`.
+  case none
 
   public init?(argument: String) {
     let value = argument.lowercased()
     if value == "auto" {
       self = .auto
+    } else if value == "none" {
+      self = .none
     } else if let n = Int(value), (1...SpeakerCount.maximum).contains(n) {
       self = .exactly(n)
     } else {
@@ -22,18 +26,20 @@ public enum SpeakerCount: Equatable, Sendable, ExpressibleByArgument, CustomStri
     switch self {
     case .auto: return "auto"
     case .exactly(let n): return String(n)
+    case .none: return "none"
     }
   }
 
-  /// Most speakers the transcript may contain.
+  /// Most speakers the transcript may contain; 0 for `none`.
   public var limit: Int {
     switch self {
     case .auto: return SpeakerCount.maximum
     case .exactly(let n): return n
+    case .none: return 0
     }
   }
 
-  public static var allValueStrings: [String] { ["auto", "1", "2", "3", "4"] }
+  public static var allValueStrings: [String] { ["auto", "none", "1", "2", "3", "4"] }
 }
 
 /// The flags of a transcription run. A run never asks anything: missing flags use defaults.
@@ -41,8 +47,11 @@ public struct RunOptions: ParsableArguments, Sendable {
   @Argument(help: "Audio or video file: m4a, mp3, ogg/opus, wav, flac, mp4, mov, …; - reads stdin.")
   public var file: String
 
-  @Option(help: "Number of speakers: 1-4 or auto (at most 4).")
-  public var speakers: SpeakerCount = .auto
+  @Option(
+    help: ArgumentHelp(
+      "Number of speakers: 1-4, auto (at most 4), or none for plain paragraphs without speaker labels (no speaker model runs). Default: auto, or none with the fast preset.",
+      valueName: "speakers"))
+  public var speakers: SpeakerCount?
 
   @Option(help: "Spoken language as an ISO 639-1 code (de, en, …) or auto.")
   public var language: String = "auto"

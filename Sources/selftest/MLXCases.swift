@@ -121,36 +121,60 @@ enum MLXCases {
       for p in cat.presets {
         let asr = try cat.entry(p.transcription)
         let spk = try cat.entry(p.speakers)
-        t.expect(asr.kind, .transcription, p.name)
+        t.expect(asr.kind == .transcription || asr.kind == .joint, p.name)
         t.expect(spk.kind, .speakers, p.name)
         t.expect(!asr.gated && !spk.gated, "\(p.name) needs no token")
+        for route in p.routing?.routes ?? [] {
+          let kind = try cat.entry(route.entry).kind
+          t.expect(
+            kind == (route.strategy == .joint ? .joint : .transcription),
+            "\(p.name) → \(route.entry)")
+          if let re = route.redecode { t.expect(try cat.entry(re).kind, .transcription, re) }
+        }
         for id in p.routing?.entries ?? [] {
-          t.expect(try cat.entry(id).kind, .transcription, "\(p.name) routes to \(id)")
           t.expect(!(try cat.entry(id).gated), "\(id) needs no token")
         }
       }
     }
 
-    t.test("presets: the v0.1.0 mapping") {
+    t.test("presets: the v0.2.0 mapping") {
       let cat = Catalogue.shared
       func pick(_ preset: String, _ language: String) throws -> String {
         let (route, entry) = try PresetRouting.route(
           cat.preset(named: preset), language: language, catalogue: cat)
         return "\(entry.id)/\(route?.strategy.rawValue ?? "-")"
+          + (route?.redecode.map { "+\($0)" } ?? "")
       }
       t.expect(try pick("fast", "de"), "parakeet-ultra/windows")
       t.expect(try pick("fast", "ja"), "qwen3-asr-1.7b-8bit/turnwise")
-      t.expect(try pick("default", "en"), "parakeet-ultra/turnwise")
+      t.expect(try cat.preset(named: "fast").labelsByDefault, false, "fast labels no speakers")
+      t.expect(try pick("default", "en"), "parakeet-ultra/windows")
       t.expect(try pick("default", "zh"), "qwen3-asr-1.7b-8bit/turnwise")
-      for preset in ["accurate", "extreme"] {
-        t.expect(try pick(preset, "en"), "parakeet-ultra/turnwise", preset)
-        t.expect(try pick(preset, "de"), "parakeet-ultra/turnwise", preset)
-        t.expect(try pick(preset, "fr"), "qwen3-asr-1.7b-8bit/turnwise", "\(preset) fr → Qwen3")
-        t.expect(try pick(preset, "hr"), "parakeet-ultra/turnwise", "\(preset) hr → Ultra only")
-      }
+      t.expect(try pick("accurate", "en"), "parakeet-ultra/turnwise")
+      t.expect(try pick("accurate", "fr"), "parakeet-ultra/turnwise", "Ultra covers French")
+      t.expect(try pick("accurate", "ja"), "qwen3-asr-1.7b-8bit/turnwise")
+      t.expect(try pick("extreme", "de"), "moss-transcribe-diarize-0.9b-8bit/joint+parakeet-ultra")
+      t.expect(try pick("extreme", "en"), "moss-transcribe-diarize-0.9b-8bit/joint+parakeet-ultra")
+      t.expect(try pick("extreme", "ja"), "moss-transcribe-diarize-0.9b-8bit/joint", "MOSS words")
+      t.expect(try pick("extreme", "hr"), "parakeet-ultra/turnwise", "MOSS has no Croatian")
       t.expect(cat.presets.allSatisfy { $0.speakers == "nemotron3-offline" }, "Nemotron offline")
       t.expect(
         cat.presets.allSatisfy { $0.ramGB.map { $0.lowerBound > 0 } ?? true }, "RAM > 0")
+    }
+
+    t.test("presets: the fallback after a joint route is the next matching route") {
+      let cat = Catalogue.shared
+      let extreme = try cat.preset(named: "extreme")
+      let (first, _) = try PresetRouting.route(extreme, language: "de", catalogue: cat)
+      let (next, entry) = try PresetRouting.route(
+        extreme, language: "de", catalogue: cat, after: first)
+      t.expect(entry.id, "parakeet-ultra")
+      t.expect(next?.strategy, .turnwise)
+      let (nextJa, entryJa) = try PresetRouting.route(
+        extreme, language: "ja", catalogue: cat,
+        after: try PresetRouting.route(extreme, language: "ja", catalogue: cat).0)
+      t.expect(entryJa.id, "qwen3-asr-1.7b-8bit")
+      t.expect(nextJa?.strategy, .turnwise)
     }
 
     t.test("presets: a language no route supports is an error naming --language") {
@@ -168,13 +192,37 @@ enum MLXCases {
     t.test("presets: entries lists everything setup must download") {
       let p = try Catalogue.shared.preset(named: "default")
       t.expect(p.entries, ["parakeet-ultra", "qwen3-asr-1.7b-8bit", "nemotron3-offline"])
+      let e = try Catalogue.shared.preset(named: "extreme")
+      t.expect(
+        e.entries,
+        [
+          "moss-transcribe-diarize-0.9b-8bit", "parakeet-ultra", "qwen3-asr-1.7b-8bit",
+          "nemotron3-offline",
+        ])
+      t.expect(
+        e.setupEntries(in: .shared),
+        ["moss-transcribe-diarize-0.9b-8bit", "parakeet-ultra", "nemotron3-offline"],
+        "setup fetches MOSS and Ultra for en/de")
     }
 
-    t.test("presets: extreme says it is accurate for now") {
-      let e = try Catalogue.shared.preset(named: "extreme")
-      let a = try Catalogue.shared.preset(named: "accurate")
-      t.expect(e.routing, a.routing)
-      t.expect(e.summary.hasPrefix("Currently identical to accurate"), "honest summary")
+    t.test("qwen3: a looping decode is recognised at any phase") {
+      t.expect(MLXTranscriber.loops("a b a b a b a b"), true)
+      t.expect(MLXTranscriber.loops("prefix a b a b a b a b"), true, "odd phase")
+      t.expect(MLXTranscriber.loops("x a b c a b c a b c a b c"), true, "trigram, phase 1")
+      t.expect(MLXTranscriber.loops("das ist ja das ist ja gut"), false, "two repeats are speech")
+      t.expect(MLXTranscriber.loops("ja ja ja"), false, "three is still speech")
+      t.expect(MLXTranscriber.loops(""), false)
+    }
+
+    t.test("moss: policy by length, and an incomplete result is not used") {
+      t.expect(MossPolicy.options(duration: 600)?.kvCachePrecision, .float16)
+      t.expect(MossPolicy.options(duration: 600)?.maxTokens, 6000)
+      t.expect(MossPolicy.options(duration: 60)?.maxTokens, MossPolicy.minimumTokens)
+      t.expect(MossPolicy.options(duration: 60 * 60)?.kvCachePrecision, .float16, "never int8")
+      t.expect(MossPolicy.options(duration: 61 * 60) == nil, "too long for MOSS")
+      t.expect(SpeakerAssignment.cap([0, 1, 2, 1, 0, 2, 2], 2), [0, 0, 2, 2, 0, 2, 2])
+      t.expect(SpeakerAssignment.cap([2, 0, 0], 1), [0, 0, 0], "leading words take the kept one")
+      t.expect(SpeakerAssignment.cap([0, 1], 0), [0, 1], "0 keeps all")
     }
 
     t.test("mlx: models live under models/mlx/<org>/<name>") {
@@ -343,6 +391,15 @@ enum MLXCases {
     }
   }
 
+  /// A stand-in speech engine: one short word at 0.2 s of every segment.
+  struct ShortWord: TranscriptionEngine {
+    func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress) async throws
+      -> [Word]
+    {
+      [Word("w", 0.2, 0.5)]
+    }
+  }
+
   /// A stand-in speech engine that always "hears" the same text.
   struct FixedText: TranscriptionEngine {
     let text: String
@@ -365,7 +422,7 @@ enum MLXCases {
       t.expect(pieces.allSatisfy { $0.speaker == 0 && $0.range.count <= 25 * sr }, "≤25 s")
     }
 
-    t.test("turns: overlap goes to the newcomer, gaps split in the middle, nothing dropped") {
+    t.test("turns: overlap goes to the longer segment, gaps split in the middle, nothing dropped") {
       let segs = [
         SpeakerSegment(0, 0, 5), SpeakerSegment(1, 4, 8), SpeakerSegment(0, 10, 12),
         SpeakerSegment(0, 13, 14),
@@ -373,9 +430,63 @@ enum MLXCases {
       let pieces = TurnwiseDecoding.plan(
         segments: segs, sampleCount: 15 * sr, maxSpeakers: 4, energy: flat)
       t.expect(pieces.map(\.speaker), [0, 1, 0])
-      t.expect(pieces[0].range, 0..<(4 * sr), "speaker 1 takes over at 4 s")
-      t.expect(pieces[1].range, (4 * sr)..<(9 * sr), "the 8–10 s gap splits at 9 s")
+      t.expect(pieces[0].range, 0..<(5 * sr), "the 5 s segment keeps the 4–5 s overlap")
+      t.expect(pieces[1].range, (5 * sr)..<(9 * sr), "the 8–10 s gap splits at 9 s")
       t.expect(pieces[2].range, (9 * sr)..<(15 * sr), "same-speaker pause and tail stay in")
+      t.expect(pieces[1].padded, Int(4.7 * Double(sr))..<Int(9.3 * Double(sr)), "0.3 s context")
+      t.expect(pieces[0].padded.lowerBound, 0, "context stays inside the file")
+      t.expect(pieces[2].padded.upperBound, 15 * sr)
+    }
+
+    t.test("turns: a cut moves to the quietest point within 0.3 s") {
+      let segs = [SpeakerSegment(0, 0, 5), SpeakerSegment(1, 5, 10)]
+      let quietAt = Int(5.2 * Double(sr))
+      let pieces = TurnwiseDecoding.plan(
+        segments: segs, sampleCount: 10 * sr, maxSpeakers: 4
+      ) { r in r.contains(quietAt) ? 0 : 1 }
+      t.expect(pieces.count, 2)
+      t.expect(abs(pieces[0].range.upperBound - quietAt) <= sr / 10, "cut near 5.2 s")
+      t.expect(pieces[0].range.upperBound, pieces[1].range.lowerBound, "no gap")
+    }
+
+    t.test("turns: a listener's fragment over the talker is no turn") {
+      let segs = [
+        SpeakerSegment(0, 0, 10), SpeakerSegment(1, 4, 4.4), SpeakerSegment(1, 10.2, 13),
+      ]
+      let pieces = TurnwiseDecoding.plan(
+        segments: segs, sampleCount: 13 * sr, maxSpeakers: 4, energy: flat)
+      t.expect(pieces.map(\.speaker), [0, 1], "the 0.4 s 'mm-hm' at 4 s is absorbed")
+    }
+
+    t.test("segments: cleaning merges near neighbours and drops overlapped fragments") {
+      let segs = [
+        SpeakerSegment(0, 0, 3), SpeakerSegment(0, 3.3, 6),  // gap 0.3 → merged
+        SpeakerSegment(1, 2, 2.5),  // inside speaker 0 → dropped
+        SpeakerSegment(1, 6.2, 6.8),  // 0.2 s after speaker 0 ends → dropped
+        SpeakerSegment(1, 8, 8.5),  // alone → kept
+        SpeakerSegment(1, 9, 12), SpeakerSegment(0, 11, 11.5),  // dropped: 1 is longer
+      ]
+      let cleaned = SpeakerSegments.clean(segs)
+      t.expect(
+        cleaned,
+        [SpeakerSegment(0, 0, 6), SpeakerSegment(1, 8, 8.5), SpeakerSegment(1, 9, 12)])
+      t.expect(SpeakerSegments.clean([]), [])
+    }
+
+    /// Runs `decode` synchronously for tests.
+    func decode(
+      _ audio: Audio, _ pieces: [TurnwiseDecoding.Piece], _ engine: any TranscriptionEngine
+    ) -> (words: [Word], speakers: [Int])? {
+      let done = DispatchSemaphore(value: 0)
+      let result = Mutex<(words: [Word], speakers: [Int])?>(nil)
+      Task {
+        let r = try? await TurnwiseDecoding.decode(
+          audio, pieces: pieces, engine: engine, language: "de", progress: .silent)
+        result.withLock { $0 = r }
+        done.signal()
+      }
+      done.wait()
+      return result.withLock { $0 }
     }
 
     t.test("turns: words take their turn's speaker, clamped to the real turn length") {
@@ -384,24 +495,114 @@ enum MLXCases {
         TurnwiseDecoding.Piece(speaker: 3, range: 0..<(sr / 2)),
         TurnwiseDecoding.Piece(speaker: 1, range: (sr / 2)..<(10 * sr)),
       ]
-      let done = DispatchSemaphore(value: 0)
-      let result = Mutex<(words: [Word], speakers: [Int])?>(nil)
-      Task {
-        let r = try? await TurnwiseDecoding.decode(
-          audio, pieces: pieces, engine: OverlongWord(), language: "de", progress: .silent)
-        result.withLock { $0 = r }
-        done.signal()
+      // The first (0.5 s, zero-padded to 1 s) piece hears a word running to 0.9 s whose middle
+      // lies past its end; the second hears a different word. Nothing on the right matches, so
+      // the left keeps its word, clamped to the turn.
+      struct Edge: TranscriptionEngine {
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          audio.duration < 1.5 ? [Word("w", 0.2, 0.9)] : [Word("v", 0.2, 0.4)]
+        }
       }
-      done.wait()
-      let r = result.withLock { $0 }
+      let r = decode(audio, pieces, Edge())
       t.expect(r?.speakers ?? [], [3, 1])
-      t.expect(r?.words.first, Word("w", 0.2, 0.5), "padded 0.5 s turn clamps to 0.5 s")
-      t.expect(r?.words.last?.end, 10)
+      t.expect(r?.words.first, Word("w", 0.2, 0.5), "clamped to the 0.5 s turn")
+      t.expect(r?.words.last, Word("v", 0.7, 0.9))
+    }
+
+    t.test("turns: an untimed engine keeps every word of a short turn") {
+      let audio = Audio(samples: [Float](repeating: 0, count: 10 * sr))
+      let pieces = TurnwiseDecoding.plan(
+        segments: [SpeakerSegment(0, 0, 3.5), SpeakerSegment(1, 4, 4.4), SpeakerSegment(0, 5, 10)],
+        sampleCount: 10 * sr, maxSpeakers: 4, energy: flat)
+      t.expect(pieces.count, 3, "the 0.4 s reply nobody talks over or around is a turn")
+      // Spread evenly over the zero-padded second, as MLX engines do.
+      struct Spread: TranscriptionEngine {
+        var timesWords: Bool { false }
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          [Word("ja", 0, audio.duration / 2), Word("genau", audio.duration / 2, audio.duration)]
+        }
+      }
+      let r = decode(audio, pieces, Spread())
+      t.expect(r?.words.count, 6, "two words per turn, none lost")
+      t.expect(r?.speakers, [0, 0, 1, 1, 0, 0])
+      let reply = (r?.words.count ?? 0) > 3 ? r?.words[3] : nil
+      t.expect(
+        reply.map { $0.start >= 3.7 && $0.end <= 4.7 } ?? false,
+        "inside the turn (gaps split in the middle)")
+    }
+
+    t.test("turns: a word heard in the context belongs to the piece its middle falls in") {
+      // The audio encodes its own time (sample value = seconds), so an engine can name each
+      // word by where it really is, whatever crop it hears: one word per whole second.
+      struct Ticker: TranscriptionEngine {
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          let offset = Double(audio.samples.first ?? 0)
+          var words: [Word] = []
+          var t = offset.rounded(.up)
+          while t < offset + audio.duration && t < 10 {
+            words.append(Word("t\(Int(t))", t - offset + 0.1, t - offset + 0.9))
+            t += 1
+          }
+          return words
+        }
+      }
+      let samples = (0..<(10 * sr)).map { Float($0) / Float(sr) }
+      let audio = Audio(samples: samples)
+      let pieces = TurnwiseDecoding.plan(
+        segments: [SpeakerSegment(0, 0, 4), SpeakerSegment(1, 4, 10)], sampleCount: 10 * sr,
+        maxSpeakers: 4, energy: flat)
+      let r = decode(audio, pieces, Ticker())
+      t.expect(r?.words.map(\.text), (0..<10).map { "t\($0)" }, "every second once, none twice")
+      t.expect(r?.speakers, [0, 0, 0, 0, 1, 1, 1, 1, 1, 1])
+    }
+
+    t.test("turns: a word at the cut is kept once, and never lost") {
+      // Sample values encode the time, so the engine knows which side of the cut it hears.
+      let audio = Audio(samples: (0..<(8 * sr)).map { Float($0) / Float(sr) })
+      let pieces = TurnwiseDecoding.plan(
+        segments: [SpeakerSegment(0, 0, 4), SpeakerSegment(1, 4, 8)], sampleCount: 8 * sr,
+        maxSpeakers: 4, energy: flat)
+      t.expect(pieces.map(\.range.lowerBound), [0, 4 * sr], "flat energy: the cut stays at 4 s")
+      // Both sides hear "cut" around 4 s: the left places it 3.8–4.3 (middle 4.05, past the
+      // cut), the right at 3.75–4.15 in file time (middle 3.95, before the cut).
+      struct Disagree: TranscriptionEngine {
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          audio.samples.first == 0
+            ? [Word("links", 1, 2), Word("cut", 3.8, 4.3)]  // left piece, padded 0–4.3
+            : [Word("Cut.", 0.05, 0.45), Word("rechts", 1, 2)]  // right piece, padded 3.7–8
+        }
+      }
+      let r = decode(audio, pieces, Disagree())
+      t.expect(r?.words.map(\.text), ["links", "cut", "rechts"], "the left side keeps it")
+      t.expect(r?.speakers, [0, 0, 1])
+      // Both sides keep it: the deeper copy survives.
+      struct Agree: TranscriptionEngine {
+        func transcribe(_ audio: Audio, language: String?, progress: TMSM.Progress)
+          async throws -> [Word]
+        {
+          audio.samples.first == 0
+            ? [Word("links", 1, 2), Word("cut", 3.5, 3.9)]  // middle 3.7: left keeps
+            : [Word("cut", 0.2, 0.7), Word("rechts", 1, 2)]  // 3.9–4.4: middle 4.15, right keeps
+        }
+      }
+      let r2 = decode(audio, pieces, Agree())
+      t.expect(r2?.words.map(\.text), ["links", "cut", "rechts"], "kept once")
+      t.expect(r2?.speakers, [0, 0, 1], "deeper on the left (0.3 s in) than on the right (0.15 s)")
     }
 
     t.test("presets: every preset says how it combines speech and speakers") {
       t.expect(
-        Catalogue.shared.presets.allSatisfy { [.windows, .turnwise].contains($0.strategy) }, "set")
+        Catalogue.shared.presets.allSatisfy {
+          [.windows, .turnwise, .joint].contains($0.strategy)
+        }, "set")
     }
   }
 

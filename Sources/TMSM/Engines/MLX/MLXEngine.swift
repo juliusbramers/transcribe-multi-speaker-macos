@@ -1,8 +1,9 @@
 import Darwin
 import Foundation
 
-/// MLX models run through speech-swift: Qwen3-ASR and Voxtral Mini for speech, the Qwen3
-/// forced aligner for word timings. Everything lives under `<TMSM_HOME>/models/mlx/`.
+/// MLX models run through speech-swift: Qwen3-ASR and Voxtral Mini for speech, MOSS for speech
+/// and speakers together, the Qwen3 forced aligner for word timings. Everything lives under
+/// `<TMSM_HOME>/models/mlx/`.
 ///
 /// Which preset uses which entry is decided in `Presets`, not here.
 public enum MLXEngine {
@@ -28,8 +29,22 @@ public enum MLXEngine {
 
   static let transcribers = [qwen3Bit8, qwen3Bit5, voxtralBit8]
 
+  /// Languages MOSS-Transcribe-Diarize is known to handle (its card claims 50+ but names
+  /// these; tmsm routes only what it can stand behind).
+  public static let mossLanguages = [
+    "de", "en", "es", "fr", "it", "ja", "ko", "pt", "ru", "th", "tr", "ur", "vi", "zh",
+  ]
+
+  public static let moss = CatalogueEntry(
+    id: "moss-transcribe-diarize-0.9b-8bit", name: mossBit8Model.name, engine: folder,
+    languages: mossLanguages, downloadMB: mossBit8Model.megabytes, license: "Apache-2.0",
+    gated: false,
+    factory: .joint { home in MossTranscriber(model: mossBit8Model, home: home) },
+    storage: { home in [MLXEngine.directory(mossBit8Model, home)] },
+    prepare: { home, progress in try await MLXEngine.download(mossBit8Model, home, progress) })
+
   public static let registration = EngineRegistration(
-    engine: folder, entries: transcribers.map(\.entry))
+    engine: folder, entries: transcribers.map(\.entry) + [moss])
 
   static func modelsRoot(_ home: TMSMHome) -> URL { home.models(engine: folder) }
 

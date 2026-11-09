@@ -79,7 +79,7 @@ public struct ModelSetup: Sendable {
     for kind in [CatalogueEntry.Kind.transcription, .speakers] {
       lines.append("")
       lines.append(kind == .transcription ? "Speech-to-text models:" : "Speaker models:")
-      let entries = catalogue.entries.filter { $0.kind == kind }
+      let entries = catalogue.entries.filter { Self.offered($0, as: kind) }
       let idWidth = entries.map(\.id.count).max() ?? 0
       for entry in entries {
         lines.append("  \(pad(entry.id, idWidth))  \(describe(entry))")
@@ -90,8 +90,15 @@ public struct ModelSetup: Sendable {
     return lines.joined(separator: "\n")
   }
 
+  /// Joint models (words and speakers from one model) are offered among the speech-to-text
+  /// models; with one of them the speaker model is not run.
+  static func offered(_ entry: CatalogueEntry, as kind: CatalogueEntry.Kind) -> Bool {
+    entry.kind == kind || (kind == .transcription && entry.kind == .joint)
+  }
+
   func describe(_ entry: CatalogueEntry) -> String {
     var parts = [entry.name, Self.size(entry.downloadMB)]
+    if entry.kind == .joint { parts.append("labels speakers itself") }
     if !entry.languages.isEmpty { parts.append("\(entry.languages.count) languages") }
     parts.append(entry.license)
     if entry.gated { parts.append("gated: needs a Hugging Face token") }
@@ -160,7 +167,7 @@ public struct ModelSetup: Sendable {
     let base = (try? current.resolvePreset(nil, catalogue: catalogue))
     var chosen: [CatalogueEntry.Kind: String] = [:]
     for kind in [CatalogueEntry.Kind.transcription, .speakers] {
-      let entries = catalogue.entries.filter { $0.kind == kind }
+      let entries = catalogue.entries.filter { Self.offered($0, as: kind) }
       console.say(kind == .transcription ? "Speech-to-text model:" : "Speaker model:")
       for (i, entry) in entries.enumerated() {
         console.say("  \(i + 1)) \(entry.id): \(describe(entry))")

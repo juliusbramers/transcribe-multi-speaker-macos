@@ -2,11 +2,13 @@ import Foundation
 
 /// One model tmsm can use, registered by the engine that runs it.
 public struct CatalogueEntry: Sendable {
-  public enum Kind: String, Sendable { case transcription, speakers }
+  /// `joint`: one model that writes the words and labels the speakers.
+  public enum Kind: String, Sendable { case transcription, speakers, joint }
 
   public enum Factory: Sendable {
     case transcription(@Sendable (TMSMHome) -> any TranscriptionEngine)
     case speakers(@Sendable (TMSMHome) -> any SpeakerEngine)
+    case joint(@Sendable (TMSMHome) -> any JointEngine)
   }
 
   public var id: String
@@ -29,6 +31,7 @@ public struct CatalogueEntry: Sendable {
     switch factory {
     case .transcription: return .transcription
     case .speakers: return .speakers
+    case .joint: return .joint
     }
   }
 
@@ -105,6 +108,9 @@ extension CatalogueEntry.Factory {
       _ = try await make(home).transcribe(silence, language: nil, progress: progress)
     case .speakers(let make):
       _ = try await make(home).label(silence, maxSpeakers: 4, progress: progress)
+    case .joint(let make):
+      _ = try await make(home).transcribe(
+        silence, language: nil, maxSpeakers: 4, progress: progress)
     }
   }
 }

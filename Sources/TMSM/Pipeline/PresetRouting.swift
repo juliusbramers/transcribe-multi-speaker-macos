@@ -7,6 +7,8 @@ public enum PresetRouting {
   public struct Choice: Sendable {
     public var entry: CatalogueEntry
     public var strategy: Strategy
+    /// The route that chose `entry`; nil for unrouted presets.
+    public var route: LanguageRouting.Route?
     /// The language every decode gets; nil only for unrouted presets left on automatic.
     public var language: String?
   }
@@ -29,7 +31,12 @@ public enum PresetRouting {
 
   /// The route for a known language; an error naming `--language` and the supported languages
   /// when no route has it (never a silent substitute).
-  public static func route(_ preset: Preset, language: String, catalogue: Catalogue) throws
+  ///
+  /// `after` skips that route, everything before it and every other joint route: the fallback
+  /// when a joint model gives up on a file.
+  public static func route(
+    _ preset: Preset, language: String, catalogue: Catalogue, after: LanguageRouting.Route? = nil
+  ) throws
     -> (LanguageRouting.Route?, CatalogueEntry)
   {
     guard let routing = preset.routing else {
@@ -39,7 +46,11 @@ public enum PresetRouting {
       }
       return (nil, entry)
     }
-    for route in routing.routes {
+    var routes = Array(routing.routes)
+    if let after, let i = routes.firstIndex(of: after) {
+      routes = routes[(i + 1)...].filter { $0.strategy != .joint }
+    }
+    for route in routes {
       let entry = try catalogue.entry(route.entry)
       if (route.only ?? entry.languages).contains(language), entry.languages.contains(language) {
         return (route, entry)
@@ -62,11 +73,16 @@ public enum PresetRouting {
       if let language {
         _ = try route(preset, language: language, catalogue: catalogue)
       } else if !entry.languages.isEmpty {
+        // A joint model cannot detect (it takes no language); the standard detectors do.
+        let detectors =
+          entry.kind == .joint
+          ? Presets.detectors.filter { id in catalogue.entries.contains { $0.id == id } }
+          : [entry.id]
         code = try await detect(
-          audio, detectors: [entry.id], candidates: candidates, home: home,
+          audio, detectors: detectors, candidates: candidates, home: home,
           catalogue: catalogue, progress: progress)
       }
-      return Choice(entry: entry, strategy: preset.strategy, language: code)
+      return Choice(entry: entry, strategy: preset.strategy, route: nil, language: code)
     }
     var code = language ?? ""
     if language == nil {
@@ -76,7 +92,8 @@ public enum PresetRouting {
     }
     let (route, entry) = try self.route(preset, language: code, catalogue: catalogue)
     if let note = route?.note { LanguageDetection.warn(note, progress: progress) }
-    return Choice(entry: entry, strategy: route?.strategy ?? preset.strategy, language: code)
+    return Choice(
+      entry: entry, strategy: route?.strategy ?? preset.strategy, route: route, language: code)
   }
 
   /// Each detector transcribes up to a minute of speech, unconditioned, and the language is

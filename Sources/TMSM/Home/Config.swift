@@ -42,7 +42,8 @@ public struct Config: Codable, Sendable, Equatable {
     let chosen = (name ?? preset ?? Catalogue.defaultPreset).lowercased()
     guard chosen == Config.individual else { return try catalogue.preset(named: chosen) }
     guard let transcription, let speakers else { throw SetupError.noIndividualModels }
-    guard try catalogue.entry(transcription).kind == .transcription else {
+    let kind = try catalogue.entry(transcription).kind
+    guard kind == .transcription || kind == .joint else {
       throw SetupError.wrongKind(transcription, .transcription)
     }
     guard try catalogue.entry(speakers).kind == .speakers else {
@@ -50,6 +51,7 @@ public struct Config: Codable, Sendable, Equatable {
     }
     return Preset(
       name: Config.individual, transcription: transcription, speakers: speakers,
-      summary: "\(transcription) + \(speakers)", ramGB: nil)
+      summary: "\(transcription) + \(speakers)", ramGB: nil,
+      strategy: kind == .joint ? .joint : .windows)
   }
 }

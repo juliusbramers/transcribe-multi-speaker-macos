@@ -136,6 +136,44 @@ enum CoreCases {
       t.expect(act.mass(5, 0, 1), 0, "unknown speaker has no mass")
     }
 
+    t.test("assign: a two-word island inside another speaker's flow joins it") {
+      let words = [
+        Word("a", 0, 0.3), Word("b", 0.35, 0.6), Word("c", 0.65, 0.8), Word("d", 0.85, 1.1),
+        Word("e", 1.15, 1.4),
+      ]
+      let segs = [SpeakerSegment(0, 0, 1.5), SpeakerSegment(1, 0.6, 1.1)]
+      // b..d overlap speaker 1 as much as 0; without activity the tie keeps speaker 0 on b,
+      // then c and d go by overlap. The island of ≤2 words rejoins the flow.
+      let r = SpeakerAssignment.assign(words: words, segments: segs, maxSpeakers: 4)
+      t.expect(r, [1, 1, 1, 1, 1])
+    }
+
+    t.test("assign: a long island stays") {
+      let words = (0..<8).map { Word("w\($0)", Double($0) * 0.3, Double($0) * 0.3 + 0.25) }
+      let segs = [
+        SpeakerSegment(0, 0, 0.9), SpeakerSegment(1, 0.9, 2.1), SpeakerSegment(0, 2.1, 2.4),
+      ]
+      let r = SpeakerAssignment.assign(words: words, segments: segs, maxSpeakers: 4)
+      t.expect(r, [1, 1, 1, 2, 2, 2, 2, 1], "four words are no island")
+    }
+
+    t.test("flags: --speakers none means no labels") {
+      t.expect(SpeakerCount(argument: "none"), SpeakerCount.none)
+      t.expect(SpeakerCount.none.limit, 0)
+      t.expect(SpeakerCount.allValueStrings.contains("none"), "listed")
+    }
+
+    t.test("render: an unlabelled transcript is paragraphs split at pauses") {
+      let words = [Word("Ja", 0, 0.3), Word("gut.", 0.4, 0.8), Word("Also", 2.5, 2.8)]
+      let tr = Transcript(title: "x", words: words, speakers: [1, 2, 1], labelled: false)
+      t.expect(tr.speakerCount, 0)
+      t.expect(tr.markdown, "# x\n\nJa gut.\n\nAlso\n")
+      let close = Transcript(
+        title: "x", words: [Word("a", 0, 0.3), Word("b", 1.0, 1.3)], speakers: [1, 2],
+        labelled: false)
+      t.expect(close.turns.count, 1, "a 0.7 s pause is no paragraph break")
+    }
+
     t.test("assign: a lone short word inside another speaker's flow joins it") {
       // The flowing speaker's segment still covers "dann"; a 0.2 s burst of speaker 1 too.
       let words = [
@@ -229,8 +267,8 @@ enum CoreCases {
     t.test("flags: defaults") {
       let o = try RunOptions.parse(["memo.opus"])
       t.expect(o.file, "memo.opus")
-      t.expect(o.speakers, .auto)
-      t.expect(o.speakers.limit, 4)
+      t.expect(o.speakers, nil, "the preset decides: auto, or none for fast")
+      t.expect(SpeakerCount.auto.limit, 4)
       t.expect(o.languageCode, nil)
       t.expect(o.output, nil)
       t.expect(o.preset, nil)
@@ -244,7 +282,7 @@ enum CoreCases {
         "fast", "--json", "--quiet",
       ])
       t.expect(o.speakers, .exactly(3))
-      t.expect(o.speakers.limit, 3)
+      t.expect(o.speakers?.limit, 3)
       t.expect(o.languageCode, "de")
       t.expect(o.output, "out/")
       t.expect(o.preset, "fast")

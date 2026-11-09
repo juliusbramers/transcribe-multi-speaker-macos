@@ -25,6 +25,57 @@ extension MLXEngine {
         "vocab.json", 2_776_833, "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"),
     ])
 
+  /// MOSS-Transcribe-Diarize 0.9B, decoder in int8 (the audio encoder stays fp16).
+  static let mossBit8Model = MLXModel(
+    repo: "aufklarer/MOSS-Transcribe-Diarize-0.9B-MLX-INT8", name: "MOSS-Transcribe-Diarize 0.9B",
+    revision: "90aa65287111a327db98eb83e325bd5332945edd",
+    files: [
+      .init(
+        "added_tokens.json", 707, "c0284b582e14987fbd3d5a2cb2bd139084371ed9acbae488829a1c900833c680"
+      ),
+      .init(
+        "audio_encoder.safetensors", 624_970_399,
+        "9cd0ac331cba4fddbd3c770e1ee327a8d03cbd65c740fcc4eafe9bbf0d21a71d"),
+      .init(
+        "chat_template.jinja", 4762,
+        "8641466a16b184ebaf7c4903391e607cfd532ab937e81a64120628ab79d827f4"),
+      .init(
+        "config.json", 1035, "a80f290aa7ff92dbcb255c1f98274a357ca69ab7c984c3de0ed35d56c78ced27"),
+      .init(
+        "decoder.safetensors", 633_438_366,
+        "f43b7f2fe6ac2cbbc7bf54c3b4728d1fe424cb89f386d14dea38ed09e771d1fc"),
+      .init(
+        "export_config.json", 2372,
+        "c66f9ec6850ea0a1fbec7369e975bbf831c1d790a9ba017b3264e2d25e216b2e"),
+      .init(
+        "generation_config.json", 107,
+        "e53a4b3ce4f944230cf1ca8fed0c42f4ff0d8c1443eaf98b5315d987334dd9e4"),
+      .init(
+        "merges.txt", 1_671_853, "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"),
+      .init(
+        "preprocessor_config.json", 315,
+        "ba2e601484abc80f4cded977f9a4fd4a53175b7d35c2f2511f0cfc3a32ad2499"),
+      .init(
+        "processor_config.json", 292,
+        "a978c2dd54a65b576c3dae4b654fe9bcbac1184c6db2df0afb2c90fcdc872ae7"),
+      .init(
+        "source_config.json", 2335,
+        "2b2b7a6e61334152bdd7ecf8a4da3073b4940a097e193d1d2b22093e77535234"),
+      .init(
+        "special_tokens_map.json", 613,
+        "76862e765266b85aa9459767e33cbaf13970f327a0e88d1c65846c2ddd3a1ecd"),
+      .init(
+        "tokenizer.json", 11_423_222,
+        "bcf03774334462d6e34b5005cb11120a62275f146ee2953e68731ecdbce84fbb"),
+      .init(
+        "tokenizer_config.json", 503,
+        "61d04c96104177240688396655ae3f7cf38ce2ea036db867a1d2b6883e27c3d5"),
+      .init(
+        "validation.json", 1791, "83f2f9f5bdfc5a4cd84e2c94840437ff092767432a2f4332534b8aafe0707a2a"),
+      .init(
+        "vocab.json", 2_776_833, "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"),
+    ])
+
   static let qwen3Bit8Model = MLXModel(
     repo: "aufklarer/Qwen3-ASR-1.7B-MLX-8bit", name: "Qwen3-ASR 1.7B 8-bit",
     revision: "e5450a26d1fd417c45fc9c405651ddc3180a27a6",
