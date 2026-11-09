@@ -196,7 +196,7 @@ public enum Presets {
 
   /// MOSS-Transcribe-Diarize hears the whole file and cuts the speaker turns; Ultra decodes
   /// each turn. Languages Ultra lacks keep MOSS's own words. If MOSS cannot finish a file
-  /// (over 90 minutes, or its decoder stops early), the accurate routes take over.
+  /// (over 60 minutes, or its decoder stops early), the accurate routes take over.
   public static let extreme = Preset(
     name: "extreme", speakers: speakers,
     summary:

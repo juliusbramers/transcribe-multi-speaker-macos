@@ -25,10 +25,13 @@ languages; tmsm never substitutes one silently.
 ¹ A note on stderr says the run is slower and needs about 6 GB.
 ² MOSS's card names these: de, en, es, fr, it, ja, ko, pt, ru, th, tr, ur, vi, zh. Languages
 Parakeet covers get Ultra's words on MOSS's turns; the rest keep MOSS's words.
-³ MOSS holds the whole recording in its context: memory grows with length. Up to 45 min the
-cache is fp16, up to 90 min int8; longer recordings, and recordings MOSS does not finish (its
-decoder stops early, or audible speech of 45 s or more has no segment), fall back to the
-accurate pipeline with a note on stderr and a `fallback` field in `--json`.
+³ MOSS holds the whole recording in its context: memory grows with length (about 114 KB per
+token, 12.5 audio tokens per second plus the transcript). It runs on recordings up to 60 min
+(estimated 14 GB at the top); longer recordings, and recordings MOSS does not finish (its decoder
+stops early, writes no segments for audible audio, or leaves audible speech of 45 s or more
+without a segment), fall back to the accurate pipeline with a note on stderr and a `fallback`
+field in `--json`. The int8 key/value cache was tried on the 38-min file: 0.7 GB less, 2.5× the
+time, and the speakers collapsed from 68 turns to 17, so it is not used.
 
 **Strategies.**
 - *windows*: the whole file is transcribed in Parakeet's own long-form windows, speakers are

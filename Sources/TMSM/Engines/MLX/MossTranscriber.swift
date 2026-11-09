@@ -102,10 +102,11 @@ struct MossTranscriber: JointEngine {
 
 /// How MOSS is run for a recording of a given length, and when it is not.
 ///
-/// The key/value cache grows with the audio (12.5 audio tokens per second) and the transcript.
-/// Measured on a 38-minute two-speaker recording: 9.6 GB peak with the fp16 cache. Beyond
-/// `fp16MaxSeconds` the cache is stored in int8, beyond `maxSeconds` the model is skipped and
-/// the pipeline falls back to the next route.
+/// The key/value cache grows with the audio (12.5 audio tokens per second) and the transcript,
+/// at 114 688 bytes per token in fp16. Measured on a 38-minute two-speaker recording: 9.6 GB
+/// peak, 417 segments, 68 turns. The int8 cache is not used: on the same recording it kept
+/// 0.7 GB, took 2.5 times as long and collapsed the speakers (172 segments, 17 turns). Beyond
+/// `maxSeconds` the model is skipped and the pipeline falls back to the next route.
 enum MossPolicy {
   /// The decoder's context: audio tokens, prompt and output together.
   static let contextTokens = 131_072
@@ -116,12 +117,9 @@ enum MossPolicy {
   /// (words, punctuation, time marks and speaker tags); 10 leaves room for dense speech.
   static let outputTokensPerSecond = 10.0
   static let minimumTokens = 2048
-  /// Longest recording decoded with an fp16 cache, in seconds (45 min: about 60 000 tokens,
-  /// 6.9 GB of cache at 114 688 bytes per token, about 12 GB in all).
-  static let fp16MaxSeconds = 45.0 * 60
-  /// Longest recording MOSS decodes at all, in seconds (90 min: about 123 000 tokens, which
-  /// fits the context, about 7 GB of int8 cache, about 12 GB in all).
-  static let maxSeconds = 90.0 * 60
+  /// Longest recording MOSS decodes, in seconds (60 min: about 81 000 tokens, 9.3 GB of cache,
+  /// about 14 GB in all; measured 10.7 GB on a 60-minute file with the int8 cache).
+  static let maxSeconds = 60.0 * 60
   /// A transcript whose last segment ends more than this before the audio does is incomplete.
   static let tailSeconds = 60.0
   /// Audible audio of at least this length with no segment means the model skipped speech.
@@ -139,7 +137,6 @@ enum MossPolicy {
 
   static func options(duration: Double) -> MossMLXDecodingOptions? {
     guard let maxTokens = outputTokens(duration: duration) else { return nil }
-    return MossMLXDecodingOptions(
-      maxTokens: maxTokens, kvCachePrecision: duration <= fp16MaxSeconds ? .float16 : .int8)
+    return MossMLXDecodingOptions(maxTokens: maxTokens, kvCachePrecision: .float16)
   }
 }
