@@ -56,12 +56,12 @@ with 4 speakers each, from the v1 bake-off):
 
 | Pipeline | turns on the 38-min file | turns ≤3 words | WER vs cloud text ⁴ | AMI cpWER ⁵ | time | peak RAM |
 |---|---:|---:|---:|---:|---:|---:|
-| v0.1.0 default/accurate (Ultra turn-wise, raw Nemotron turns) | 460 | 202 | 25.9 % | AMI_OLD_ACC | 55 s | 0.5 GB |
-| default (Ultra windows + cleaned Nemotron) | 126 | 15 | 20.3 % | AMI_DEFAULT | 55 s | 0.5 GB |
-| accurate (cleaned Nemotron turns, Ultra with context) | 120 | 18 | 20.5 % | AMI_ACCURATE | 67 s | 0.4 GB |
-| Qwen3-ASR 1.7B 8-bit, windows + aligner | 288 | 105 | QWEN_WER | — | 197 s | 6.2 GB |
+| v0.1.0 default/accurate (Ultra turn-wise, raw Nemotron turns) | 460 | 202 | 25.9 % | 21.8 % | 55 s | 0.5 GB |
+| default (Ultra windows + cleaned Nemotron; fast with `--speakers auto` is the same) | 136 | 21 | 20.3 % | 20.4 % | 38 s | 0.4 GB |
+| accurate (cleaned Nemotron turns, Ultra with context) | 118 | 12 | 20.8 % | 20.5 % | 56 s | 0.4 GB |
+| Qwen3-ASR 1.7B 8-bit, windows + aligner, trigram mask off | 288 | 105 | 25.2 % | — | 266 s | 6.3 GB |
 | MOSS alone (words and turns) | 68 | 1 | 28.1 % | — | 398 s | 9.6 GB |
-| extreme (MOSS turns, Ultra words) | 66 | 1 | 20.7 % | AMI_EXTREME | 636 s | 9.7 GB |
+| extreme (MOSS turns, Ultra words) | 66 | 1 | 20.7 % | 20.8 % | 588 s | 9.7 GB |
 
 The v0.1.0 turn-wise pipeline decoded every sub-second listener fragment on its own and
 Parakeet answered with English fillers ("Yeah.", "Thank you.": about 100 of them). The cloud
@@ -72,7 +72,10 @@ fresh human references; see `notes/` in the workspace for the full analysis.
 
 ⁴ Normalised: NFKC, casefold, punctuation removed (the bake-off's normaliser).
 ⁵ Speaker-attributed WER on ES2004b, IS1009b and TS3003b, 300–540 s, English, 4 speakers,
-`--speakers 4 --language en`, pooled over the three.
+`--speakers 4 --language en`, pooled over the three. On these far-field 4-minute excerpts both
+Nemotron and MOSS find only one or two of the four speakers, so the figure mostly reflects the
+words; the differences between the new presets are within noise, the gain over v0.1.0 is the
+removed filler turns.
 
 **Language.** `--language` wins. Otherwise the language is detected once per file from up to
 three windows of speech (about a minute), and that language is passed to every window or turn.

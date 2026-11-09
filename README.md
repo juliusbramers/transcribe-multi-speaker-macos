@@ -48,7 +48,7 @@ Input: m4a, mp3, ogg/opus, wav, flac, and the audio of mp4/mov (opus needs `ffmp
 | `fast` | Parakeet Ultra alone, plain paragraphs (`--speakers auto` adds Nemotron-3) | 0.4 GB | 0.8 GB |
 | `default` | Parakeet Ultra, Nemotron-3 speaker segments, words assigned by overlap | 0.4 GB | 0.8 GB |
 | `accurate` | Nemotron-3 first, then every speaker turn decoded on its own by Parakeet Ultra | 0.4 GB | 0.8 GB |
-| `extreme` | MOSS-Transcribe-Diarize hears the whole file and cuts the speaker turns, Parakeet Ultra decodes them | up to 12 GB | 2.1 GB |
+| `extreme` | MOSS-Transcribe-Diarize hears the whole file and cuts the speaker turns, Parakeet Ultra decodes them | 10 GB at 38 min, about 14 GB at 60 | 2.1 GB |
 
 English and German are what the presets are tuned on. Parakeet Ultra covers 25 European languages; other languages go to Qwen3-ASR 1.7B (3.7 GB, fetched on first use, about 6 GB of RAM). `extreme` runs MOSS on recordings of at most 60 minutes; longer ones, and files MOSS does not finish, fall back to `accurate`'s pipeline with a note on stderr. [docs/models.md](docs/models.md) has every model, the measurements behind the presets, languages, licences and the pinned Hugging Face commits.
 

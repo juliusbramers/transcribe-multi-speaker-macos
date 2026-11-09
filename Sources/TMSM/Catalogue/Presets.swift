@@ -201,7 +201,7 @@ public enum Presets {
     name: "extreme", speakers: speakers,
     summary:
       "MOSS-Transcribe-Diarize cuts the speaker turns over the whole file, Parakeet Ultra decodes them",
-    ramGB: 0.4...9.6,
+    ramGB: 0.4...14,
     routing: LanguageRouting(
       routes: [
         .init(moss, .joint, only: FluidAudioEngine.parakeetLanguages, redecode: ultra),

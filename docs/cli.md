@@ -204,7 +204,7 @@ Presets (tmsm setup --preset <name>):
   accurate    Nemotron-3 turns, each decoded by Parakeet Ultra (Qwen3-ASR for other languages); peak RAM 0.4–6.2 GB
               820 MB download: parakeet-ultra, nemotron3-offline
               other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
-  extreme     MOSS-Transcribe-Diarize cuts the speaker turns over the whole file, Parakeet Ultra decodes them; peak RAM 0.4–9.6 GB
+  extreme     MOSS-Transcribe-Diarize cuts the speaker turns over the whole file, Parakeet Ultra decodes them; peak RAM 0.4–14 GB
               2.1 GB download: moss-transcribe-diarize-0.9b-8bit, parakeet-ultra, nemotron3-offline
               other languages may add 3.7 GB: qwen3-asr-1.7b-8bit
   individual  any two models below (tmsm setup --transcription <id> --speakers <id>)
